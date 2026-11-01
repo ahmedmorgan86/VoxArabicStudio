@@ -1,0 +1,39 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Cairo', 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    background-color: #080c14;
+    color: #e2e8f0;
+    overflow-x: hidden;
+    letter-spacing: -0.01em;
+  }
+
+  /* Optical compensation for dark surfaces */
+  p, span, label, input, textarea, button {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+/* Studio custom scrollbar */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: #090d16;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}
+
+/* Subtle focus ring */
+input:focus-visible, textarea:focus-visible, button:focus-visible {
+  outline: 2px solid rgba(6, 182, 212, 0.6);
+  outline-offset: 1px;
+}

@@ -1,0 +1,6 @@
+{
+  "name": "VoxArabic AI - استوديو تحويل النص إلى صوت واصوات اللهجات",
+  "description": "استوديو احترافي لتحويل النصوص إلى صوت طبيعي ومبهر باللغتين العربية والإنجليزية بجميع اللهجات والأنماط الصوتية",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
