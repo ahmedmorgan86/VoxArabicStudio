@@ -9,8 +9,13 @@ import {
   Copy,
   Check,
   Repeat,
+  RefreshCw,
 } from 'lucide-react';
-import { downloadWavFile, formatTime, extractWaveformPeaks } from '../utils/audioHelper';
+import {
+  downloadWavFile,
+  downloadMp3File,
+  extractWaveformPeaks,
+} from '../utils/audioHelper';
 import { AudioVisualizer } from './AudioVisualizer';
 import { Language, VoiceName } from '../types';
 
@@ -39,6 +44,7 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [isExportingMp3, setIsExportingMp3] = useState(false);
 
   const waveformPeaks = useMemo(() => {
     if (!audioBase64) return [];
@@ -79,14 +85,22 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
   const handleTimeUpdate = () => {
     if (audioRef.current) {
       setCurrentTime(audioRef.current.currentTime);
-      if (audioRef.current.duration && !isNaN(audioRef.current.duration) && isFinite(audioRef.current.duration)) {
+      if (
+        audioRef.current.duration &&
+        !isNaN(audioRef.current.duration) &&
+        isFinite(audioRef.current.duration)
+      ) {
         setDuration(audioRef.current.duration);
       }
     }
   };
 
   const handleLoadedMetadata = () => {
-    if (audioRef.current && !isNaN(audioRef.current.duration) && isFinite(audioRef.current.duration)) {
+    if (
+      audioRef.current &&
+      !isNaN(audioRef.current.duration) &&
+      isFinite(audioRef.current.duration)
+    ) {
       setDuration(audioRef.current.duration);
     }
   };
@@ -144,6 +158,21 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
     downloadWavFile(audioBase64, filename);
   };
 
+  const handleDownloadMp3 = () => {
+    if (!audioBase64 || isExportingMp3) return;
+    setIsExportingMp3(true);
+    setTimeout(() => {
+      try {
+        const filename = `voxarabic-${voiceName || 'take'}-${Date.now()}.mp3`;
+        downloadMp3File(audioBase64, filename, 192);
+      } catch (err) {
+        console.error('MP3 export failed:', err);
+      } finally {
+        setIsExportingMp3(false);
+      }
+    }, 15);
+  };
+
   const handleCopy = () => {
     if (!audioBase64) return;
     navigator.clipboard.writeText(`data:${mimeType};base64,${audioBase64}`).then(() => {
@@ -156,26 +185,31 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
 
   if (!audioBase64) {
     return (
-      <div className="rounded-xl border border-slate-800 bg-[#0b0f19] p-8 text-center">
-        <div className="mx-auto mb-2 flex h-10 w-10 items-center justify-center rounded-lg bg-slate-800/80 text-slate-400">
-          <Volume2 className="h-5 w-5" />
+      <div className="rounded-xl border border-[#DED9CE] dark:border-[#2A2723] bg-white dark:bg-[#1A1816] px-5 py-4 flex flex-col sm:flex-row items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#EDEAE2] dark:bg-[#22201C] text-[#D94E28] dark:text-[#EE6A43] shrink-0">
+            <Volume2 className="h-5 w-5" />
+          </div>
+          <div className="text-center sm:text-start">
+            <h4 className="text-xs font-bold text-[#171614] dark:text-[#F3F0EA]">
+              {isAr ? 'مشغّل الماستر جاهز (Master Audio Deck)' : 'Master Audio Deck Ready'}
+            </h4>
+            <p className="mt-0.5 text-xs text-[#5F5B53] dark:text-[#968F84]">
+              {isAr
+                ? 'اضغط على زر التوليد لعرض الموجة الصوتية والتحكم في السرعة والتصدير بصيغتي WAV و MP3'
+                : 'Synthesize audio to inspect the interactive waveform and export WAV or MP3'}
+            </p>
+          </div>
         </div>
-        <h4 className="text-sm font-semibold text-slate-200">
-          {isAr ? 'مشغل الصوت الاستوديو جاهز' : 'Master Audio Player Ready'}
-        </h4>
-        <p className="mt-1 text-xs text-slate-400">
-          {isAr
-            ? 'انقر على "توليد الصوت الآن" للاستماع للمقطع الصوتي وموجات الـ WAV'
-            : 'Click "Synthesize Audio" to listen to the 24kHz master output'}
-        </p>
+        <div className="text-[11px] font-mono text-[#5F5B53] dark:text-[#968F84] whitespace-nowrap">
+          24kHz · WAV / MP3 192kbps
+        </div>
       </div>
     );
   }
 
-  const accentColor = voiceName === 'Kore' ? 'purple' : voiceName === 'Puck' ? 'amber' : 'cyan';
-
   return (
-    <div className="rounded-xl border border-slate-800 bg-[#090d16] p-4 shadow-lg">
+    <div className="rounded-xl border border-[#DED9CE] dark:border-[#2A2723] bg-white dark:bg-[#1A1816] p-4 space-y-4">
       <audio
         ref={audioRef}
         onTimeUpdate={handleTimeUpdate}
@@ -190,51 +224,59 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
         duration={duration}
         isPlaying={isPlaying}
         onSeek={handleSeek}
-        accentColor={accentColor}
+        language={language}
       />
 
       {/* Transport Controls Bar */}
-      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-800/80 pt-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
         {/* Playback Transport */}
         <div className="flex items-center gap-2">
           <button
+            type="button"
             onClick={togglePlay}
-            className="flex h-10 w-10 items-center justify-center rounded-lg bg-cyan-400 text-slate-950 font-bold hover:bg-cyan-300 transition-colors active:scale-95 shadow-sm"
+            className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#D94E28] hover:bg-[#C2411D] text-white transition-colors active:scale-95"
             title={isPlaying ? (isAr ? 'إيقاف مؤقت' : 'Pause') : isAr ? 'تشغيل' : 'Play'}
           >
-            {isPlaying ? <Pause className="h-5 w-5 fill-current" /> : <Play className="h-5 w-5 fill-current ml-0.5" />}
+            {isPlaying ? (
+              <Pause className="h-4 w-4 fill-current" />
+            ) : (
+              <Play className="h-4 w-4 fill-current ms-0.5" />
+            )}
           </button>
 
           <button
+            type="button"
             onClick={handleRestart}
-            className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-800 bg-slate-900 text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
+            className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#DED9CE] dark:border-[#2A2723] bg-[#F6F4EF] dark:bg-[#22201C] text-[#171614] dark:text-[#F3F0EA] hover:bg-[#EDEAE2] dark:hover:bg-[#2C2924] transition-colors"
             title={isAr ? 'إعادة من البداية' : 'Restart'}
           >
             <RotateCcw className="h-4 w-4" />
           </button>
 
           <button
+            type="button"
             onClick={toggleLoop}
             className={`flex h-9 w-9 items-center justify-center rounded-lg border transition-colors ${
               isLooping
-                ? 'border-cyan-500 bg-cyan-950/60 text-cyan-300'
-                : 'border-slate-800 bg-slate-900 text-slate-400 hover:text-slate-200'
+                ? 'border-[#D94E28] bg-[#D94E28]/10 text-[#D94E28] dark:text-[#EE6A43]'
+                : 'border-[#DED9CE] dark:border-[#2A2723] bg-[#F6F4EF] dark:bg-[#22201C] text-[#5F5B53] dark:text-[#968F84] hover:text-[#171614] dark:hover:text-white'
             }`}
             title={isAr ? 'تكرار مستمر' : 'Toggle Loop'}
           >
             <Repeat className="h-4 w-4" />
           </button>
 
-          {/* Speed selector tabs */}
-          <div className="hidden sm:flex items-center gap-1 border-r border-l border-slate-800 px-2 mx-1">
+          {/* Speed selector */}
+          <div className="hidden sm:flex items-center gap-0.5 border-s border-e border-[#DED9CE] dark:border-[#2A2723] px-2 mx-1">
             {[0.75, 1, 1.25, 1.5].map((speed) => (
               <button
                 key={speed}
+                type="button"
                 onClick={() => handleSpeedChange(speed)}
                 className={`px-2 py-1 text-[11px] font-mono rounded transition-colors ${
                   playbackRate === speed
-                    ? 'bg-slate-800 text-cyan-400 font-bold'
-                    : 'text-slate-400 hover:text-slate-200'
+                    ? 'bg-[#171614] dark:bg-[#F3F0EA] text-white dark:text-[#171614] font-semibold'
+                    : 'text-[#5F5B53] dark:text-[#968F84] hover:text-[#171614] dark:hover:text-white'
                 }`}
               >
                 {speed}x
@@ -246,14 +288,15 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
         {/* Volume controls */}
         <div className="flex items-center gap-2">
           <button
+            type="button"
             onClick={toggleMute}
-            className="text-slate-400 hover:text-slate-200 transition-colors"
+            className="text-[#5F5B53] dark:text-[#968F84] hover:text-[#171614] dark:hover:text-white transition-colors"
             title={isMuted ? 'Unmute' : 'Mute'}
           >
             {isMuted || volume === 0 ? (
-              <VolumeX className="h-4 w-4 text-red-400" />
+              <VolumeX className="h-4 w-4 text-red-600 dark:text-red-400" />
             ) : (
-              <Volume2 className="h-4 w-4 text-slate-300" />
+              <Volume2 className="h-4 w-4" />
             )}
           </button>
           <input
@@ -263,39 +306,80 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
             step={0.05}
             value={isMuted ? 0 : volume}
             onChange={handleVolumeChange}
-            className="h-1 w-16 cursor-pointer appearance-none rounded bg-slate-800 accent-cyan-400"
+            className="h-1.5 w-16 cursor-pointer rounded bg-[#DED9CE] dark:bg-[#2A2723] accent-[#D94E28]"
           />
         </div>
 
-        {/* Actions: Copy & Download */}
-        <div className="flex items-center gap-2">
+        {/* Actions: Copy, Export WAV & Export MP3 */}
+        <div className="flex flex-wrap items-center gap-2">
           <button
+            type="button"
             onClick={handleCopy}
-            className="flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
+            className="flex items-center gap-1.5 rounded-lg border border-[#DED9CE] dark:border-[#2A2723] bg-[#F6F4EF] dark:bg-[#22201C] px-3 py-2 text-xs font-medium text-[#171614] dark:text-[#F3F0EA] hover:bg-[#EDEAE2] dark:hover:bg-[#2C2924] transition-colors"
             title={isAr ? 'نسخ رابط الصوت' : 'Copy Audio URL'}
           >
             {copied ? (
               <>
-                <Check className="h-3.5 w-3.5 text-emerald-400" />
-                <span className="text-emerald-400">{isAr ? 'تم النسخ' : 'Copied'}</span>
+                <Check className="h-3.5 w-3.5 text-[#15803D] dark:text-emerald-400" />
+                <span className="text-[#15803D] dark:text-emerald-400">
+                  {isAr ? 'تم النسخ' : 'Copied'}
+                </span>
               </>
             ) : (
               <>
-                <Copy className="h-3.5 w-3.5 text-slate-400" />
+                <Copy className="h-3.5 w-3.5 text-[#5F5B53] dark:text-[#968F84]" />
                 <span>{isAr ? 'نسخ' : 'Copy'}</span>
               </>
             )}
           </button>
 
           <button
+            type="button"
             onClick={handleDownload}
-            className="flex items-center gap-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 px-3.5 py-2 text-xs font-bold text-slate-950 shadow-sm transition-colors active:scale-95"
+            className="flex items-center gap-1.5 rounded-lg border border-[#DED9CE] dark:border-[#2A2723] bg-[#F6F4EF] dark:bg-[#22201C] hover:bg-[#EDEAE2] dark:hover:bg-[#2C2924] px-3 py-2 text-xs font-semibold text-[#171614] dark:text-[#F3F0EA] transition-colors active:scale-95"
+            title={isAr ? 'تحميل ملف WAV غير مضغوط' : 'Download uncompressed WAV'}
           >
-            <Download className="h-3.5 w-3.5" />
+            <Download className="h-3.5 w-3.5 text-[#D94E28] dark:text-[#EE6A43]" />
             <span>{isAr ? 'تصدير WAV' : 'Export WAV'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleDownloadMp3}
+            disabled={isExportingMp3}
+            className="flex items-center gap-1.5 rounded-lg bg-[#171614] dark:bg-[#F3F0EA] hover:bg-[#2E2B27] dark:hover:bg-white px-3.5 py-2 text-xs font-bold text-white dark:text-[#171614] transition-colors active:scale-95 disabled:opacity-60"
+            title={isAr ? 'تحميل ملف MP3 (192kbps) مدمج بالتأثيرات' : 'Download MP3 (192kbps) with applied effects'}
+          >
+            {isExportingMp3 ? (
+              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Download className="h-3.5 w-3.5" />
+            )}
+            <span>
+              {isExportingMp3
+                ? isAr
+                  ? 'جارِ التحويل...'
+                  : 'Encoding...'
+                : isAr
+                ? 'تصدير MP3'
+                : 'Export MP3'}
+            </span>
           </button>
         </div>
       </div>
+
+      {/* Subtle Take Info Line */}
+      {(voiceName || dialectName) && (
+        <div className="pt-2 border-t border-[#DED9CE] dark:border-[#2A2723] flex flex-wrap items-center gap-2 text-[11px] text-[#5F5B53] dark:text-[#968F84] font-mono">
+          {voiceName && (
+            <span className="text-[#171614] dark:text-[#F3F0EA] font-semibold">
+              {voiceName}
+            </span>
+          )}
+          {voiceName && dialectName && <span aria-hidden="true">·</span>}
+          {dialectName && <span>{dialectName}</span>}
+        </div>
+      )}
     </div>
   );
 };

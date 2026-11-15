@@ -1,14 +1,37 @@
-import React, { useState } from 'react';
-import { VOICES } from '../data/voicesAndDialects';
-import { Language, VoiceName } from '../types';
-import { Play, Square, Check, Radio } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { VOICES, VOICE_DESIGN_TEMPLATES } from '../data/voicesAndDialects';
+import {
+  CustomVoicePersona,
+  Language,
+  VoiceAgeGroup,
+  VoiceCategory,
+  VoiceName,
+  VoiceOption,
+} from '../types';
+import {
+  Play,
+  Square,
+  Check,
+  Radio,
+  Search,
+  Sparkles,
+  Plus,
+  Trash2,
+  RefreshCw,
+} from 'lucide-react';
 
 interface VoiceSelectorProps {
   selectedVoice: VoiceName;
   onSelectVoice: (voice: VoiceName) => void;
   onAuditionVoice?: (voice: VoiceName) => void;
   auditioningVoice?: VoiceName | null;
+  customVoices: CustomVoicePersona[];
+  onAddCustomVoice: (voice: CustomVoicePersona) => void;
+  onDeleteCustomVoice: (id: string) => void;
+  onPreviewCustomVoice?: (baseVoice: string, prompt: string) => Promise<void>;
+  isPreviewingCustom?: boolean;
   language: Language;
+  embedded?: boolean;
 }
 
 export const VoiceSelector: React.FC<VoiceSelectorProps> = ({
@@ -16,230 +39,528 @@ export const VoiceSelector: React.FC<VoiceSelectorProps> = ({
   onSelectVoice,
   onAuditionVoice,
   auditioningVoice,
+  customVoices,
+  onAddCustomVoice,
+  onDeleteCustomVoice,
+  onPreviewCustomVoice,
+  isPreviewingCustom = false,
   language,
+  embedded = false,
 }) => {
   const isAr = language === 'ar';
+  const [activeMode, setActiveMode] = useState<'library' | 'design'>('library');
+  const [searchQuery, setSearchQuery] = useState('');
   const [filterGender, setFilterGender] = useState<'all' | 'female' | 'male'>('all');
+  const [filterCategory, setFilterCategory] = useState<'all' | VoiceCategory>('all');
 
-  const filteredVoices = VOICES.filter((v) => {
-    if (filterGender === 'all') return true;
-    return v.gender === filterGender;
-  });
+  const [designName, setDesignName] = useState('');
+  const [designGender, setDesignGender] = useState<'female' | 'male'>('male');
+  const [designAge, setDesignAge] = useState<VoiceAgeGroup>('adult');
+  const [designBaseVoice, setDesignBaseVoice] = useState<string>('Charon');
+  const [designPrompt, setDesignPrompt] = useState('');
 
-  // Additional voice vocal profile data for rich casting presentation
-  const voiceProfiles: Record<
-    VoiceName,
-    {
-      timbreAr: string;
-      timbreEn: string;
-      bestForAr: string;
-      bestForEn: string;
-      accentHue: string;
-      waveHeights: number[];
-    }
-  > = {
-    Kore: {
-      timbreAr: 'سوبرانو دافئ ورخيم',
-      timbreEn: 'Warm Melodious Soprano',
-      bestForAr: 'البودكاست، الإعلانات، والكتب الصوتية',
-      bestForEn: 'Podcasts, Narration & Luxury Promos',
-      accentHue: 'from-pink-500/20 to-purple-500/10 border-pink-500/40 text-pink-300',
-      waveHeights: [30, 65, 45, 80, 60, 40, 75, 50],
-    },
-    Puck: {
-      timbreAr: 'تينور شبابي وحيوي',
-      timbreEn: 'Dynamic Youthful Tenor',
-      bestForAr: 'إعلانات السوشيال ميديا والمحتوى التقني',
-      bestForEn: 'Tech Reviews, Upbeat Commercials & Social',
-      accentHue: 'from-amber-500/20 to-orange-500/10 border-amber-500/40 text-amber-300',
-      waveHeights: [45, 85, 70, 95, 60, 85, 40, 65],
-    },
-    Charon: {
-      timbreAr: 'باريتون عميق وسينمائي',
-      timbreEn: 'Resonant Deep Baritone',
-      bestForAr: 'الأفلام الوثائقية والبروموهات الفخمة',
-      bestForEn: 'Documentaries, Movie Trailers & Epic Recitals',
-      accentHue: 'from-blue-500/20 to-indigo-500/10 border-blue-500/40 text-blue-300',
-      waveHeights: [80, 90, 75, 60, 85, 70, 55, 40],
-    },
-    Fenrir: {
-      timbreAr: 'طبقة قوية درامية وملحمية',
-      timbreEn: 'Commanding Narrative Baritone',
-      bestForAr: 'روايات الأكشن، القصص، والمشاهد التمثيلية',
-      bestForEn: 'Audiobooks, Dramatic Screenplays & Games',
-      accentHue: 'from-purple-500/20 to-violet-500/10 border-purple-500/40 text-purple-300',
-      waveHeights: [60, 75, 95, 85, 70, 90, 65, 50],
-    },
-    Zephyr: {
-      timbreAr: 'نبرة رقيقة هادئة وتأملية',
-      timbreEn: 'Airy Gentle & Meditative',
-      bestForAr: 'التأمل، جلسات الاسترخاء، والقصص الشاعرية',
-      bestForEn: 'Mindfulness, Sleep Stories & ASMR',
-      accentHue: 'from-teal-500/20 to-cyan-500/10 border-teal-500/40 text-teal-300',
-      waveHeights: [25, 40, 35, 55, 45, 30, 50, 35],
-    },
+  const allVoiceOptions: VoiceOption[] = useMemo(() => {
+    const mappedCustom: VoiceOption[] = customVoices.map((cv) => ({
+      id: cv.id,
+      nameAr: cv.name,
+      nameEn: cv.name,
+      gender: cv.gender,
+      ageGroup: cv.ageGroup,
+      category: 'characters',
+      timbreAr: isAr ? 'صوت مصمم مخصص' : 'Custom Designed Voice',
+      timbreEn: 'Custom Designed Voice',
+      bestForAr: cv.prompt,
+      bestForEn: cv.prompt,
+      descAr: cv.prompt,
+      descEn: cv.prompt,
+      waveHeights: [42, 78, 64, 88, 56, 74, 48, 66],
+      isCustom: true,
+      baseVoice: cv.baseVoice,
+      voiceDesignPrompt: cv.prompt,
+    }));
+    return [...mappedCustom, ...VOICES];
+  }, [customVoices, isAr]);
+
+  const filteredVoices = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return allVoiceOptions.filter((v) => {
+      if (filterGender !== 'all' && v.gender !== filterGender) return false;
+      if (filterCategory !== 'all' && !v.isCustom && v.category !== filterCategory) return false;
+      if (!q) return true;
+      return (
+        v.id.toLowerCase().includes(q) ||
+        v.nameAr.toLowerCase().includes(q) ||
+        v.nameEn.toLowerCase().includes(q) ||
+        v.timbreAr.toLowerCase().includes(q) ||
+        v.timbreEn.toLowerCase().includes(q) ||
+        v.bestForAr.toLowerCase().includes(q) ||
+        v.bestForEn.toLowerCase().includes(q)
+      );
+    });
+  }, [allVoiceOptions, filterGender, filterCategory, searchQuery]);
+
+  const categoryLabels: Array<{ id: 'all' | VoiceCategory; ar: string; en: string }> = [
+    { id: 'all', ar: 'الكل', en: 'All' },
+    { id: 'narration', ar: 'سرد وكتب', en: 'Narration' },
+    { id: 'conversational', ar: 'حواري', en: 'Conversational' },
+    { id: 'cinematic', ar: 'سينمائي', en: 'Cinematic' },
+    { id: 'news', ar: 'إخباري', en: 'News' },
+    { id: 'characters', ar: 'شخصيات', en: 'Characters' },
+    { id: 'asmr', ar: 'هادئ / ASMR', en: 'Calm / ASMR' },
+  ];
+
+  const handleSaveDesignedVoice = () => {
+    const cleanPrompt = designPrompt.trim();
+    if (!cleanPrompt) return;
+    const cleanName =
+      designName.trim() ||
+      (isAr ? `صوت مخصص #${customVoices.length + 1}` : `Custom Voice #${customVoices.length + 1}`);
+    const newVoice: CustomVoicePersona = {
+      id: `custom-${Date.now().toString(36)}`,
+      name: cleanName,
+      baseVoice: designBaseVoice,
+      gender: designGender,
+      ageGroup: designAge,
+      prompt: cleanPrompt,
+      createdAt: Date.now(),
+    };
+    onAddCustomVoice(newVoice);
+    onSelectVoice(newVoice.id);
+    setActiveMode('library');
+    setDesignName('');
+    setDesignPrompt('');
   };
 
   return (
-    <div className="rounded-xl border border-slate-800 bg-[#090d16] p-4 space-y-3.5 shadow-sm">
-      {/* Header with Title and Gender Filter Segmented Control */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 pb-3">
+    <div
+      className={
+        embedded
+          ? 'space-y-3.5'
+          : 'rounded-xl border border-[#DED9CE] dark:border-[#2A2723] bg-white dark:bg-[#1A1816] p-4 space-y-3.5'
+      }
+    >
+      {/* Header + Library / Voice Design Switch */}
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#EDEAE2] dark:border-[#26231F] pb-3">
         <div className="flex items-center gap-2">
-          <Radio className="h-4 w-4 text-cyan-400" />
+          <Radio className="h-4 w-4 text-[#D94E28] dark:text-[#EE6A43]" />
           <div>
-            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200">
-              {isAr ? 'طاقم الأصوات العصبية' : 'Neural Voice Cast'}
+            <h3 className="text-xs font-bold text-[#171614] dark:text-[#F3F0EA]">
+              {isAr ? 'مكتبة وتصميم الأصوات' : 'Voice Library & Design'}
             </h3>
-            <p className="text-[11px] text-slate-400">
-              {isAr ? 'اختر الشخصية الصوتية واستمع لعينتها الحية' : 'Select persona & audition live sample'}
+            <p className="text-[11px] text-[#5F5B53] dark:text-[#968F84] font-mono tabular-nums">
+              {isAr
+                ? `${VOICES.length} صوتاً قياسياً · ${customVoices.length} مخصص`
+                : `${VOICES.length} voices · ${customVoices.length} custom`}
             </p>
           </div>
         </div>
 
-        {/* Filter Tabs (All / Female / Male) */}
-        <div className="flex items-center rounded-lg bg-slate-900 border border-slate-800 p-0.5 text-xs">
+        <div className="flex items-center rounded-lg bg-[#EDEAE2] dark:bg-[#121110] p-0.5 text-xs">
           <button
             type="button"
-            onClick={() => setFilterGender('all')}
-            className={`px-2.5 py-1 rounded font-medium transition-colors ${
-              filterGender === 'all'
-                ? 'bg-slate-800 text-white shadow-xs'
-                : 'text-slate-400 hover:text-slate-200'
+            onClick={() => setActiveMode('library')}
+            className={`px-2.5 py-1 rounded-md font-semibold transition-colors whitespace-nowrap ${
+              activeMode === 'library'
+                ? 'bg-white dark:bg-[#26231F] text-[#171614] dark:text-white'
+                : 'text-[#5F5B53] dark:text-[#968F84] hover:text-[#171614] dark:hover:text-white'
             }`}
           >
-            {isAr ? 'الكل' : 'All'}
+            {isAr ? 'المكتبة (30)' : 'Library (30)'}
           </button>
           <button
             type="button"
-            onClick={() => setFilterGender('female')}
-            className={`px-2.5 py-1 rounded font-medium transition-colors ${
-              filterGender === 'female'
-                ? 'bg-slate-800 text-white shadow-xs'
-                : 'text-slate-400 hover:text-slate-200'
+            onClick={() => setActiveMode('design')}
+            className={`flex items-center gap-1 px-2.5 py-1 rounded-md font-semibold transition-colors whitespace-nowrap ${
+              activeMode === 'design'
+                ? 'bg-[#D94E28] text-white'
+                : 'text-[#5F5B53] dark:text-[#968F84] hover:text-[#171614] dark:hover:text-white'
             }`}
           >
-            {isAr ? 'نسائي' : 'Female'}
-          </button>
-          <button
-            type="button"
-            onClick={() => setFilterGender('male')}
-            className={`px-2.5 py-1 rounded font-medium transition-colors ${
-              filterGender === 'male'
-                ? 'bg-slate-800 text-white shadow-xs'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            {isAr ? 'رجالي' : 'Male'}
+            <Sparkles className="h-3 w-3" />
+            <span>{isAr ? 'تصميم صوت' : 'Voice Design'}</span>
           </button>
         </div>
       </div>
 
-      {/* Voice Cast List */}
-      <div className="space-y-2">
-        {filteredVoices.map((v) => {
-          const isSelected = selectedVoice === v.id;
-          const isAuditioning = auditioningVoice === v.id;
-          const profile = voiceProfiles[v.id];
+      {activeMode === 'library' ? (
+        <>
+          {/* Search + Gender Row */}
+          <div className="flex flex-col sm:flex-row gap-2">
+            <div className="relative flex-1">
+              <Search className="h-3.5 w-3.5 text-[#7A746A] absolute top-1/2 -translate-y-1/2 start-2.5 pointer-events-none" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder={
+                  isAr
+                    ? 'ابحث بالاسم أو الطابع (مثلاً: عميق، شبابي، إخباري)...'
+                    : 'Search by name, timbre, or use case...'
+                }
+                className="w-full rounded-lg border border-[#DED9CE] dark:border-[#2A2723] bg-[#F6F4EF] dark:bg-[#121110] ps-8 pe-3 py-1.5 text-xs text-[#171614] dark:text-[#F3F0EA] placeholder-[#7A746A] focus:border-[#D94E28] focus:outline-none"
+              />
+            </div>
 
-          return (
-            <div
-              key={v.id}
-              onClick={() => onSelectVoice(v.id)}
-              className={`group relative flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-lg border p-3 cursor-pointer transition-all ${
-                isSelected
-                  ? 'border-cyan-500 bg-[#0e172a] shadow-sm ring-1 ring-cyan-500/20'
-                  : 'border-slate-800/90 bg-[#0b0f19] hover:border-slate-700 hover:bg-[#0f1524]'
-              }`}
-            >
-              {/* Left Details Block */}
-              <div className="flex items-start gap-3 flex-1 min-w-0">
-                {/* Voice Selection Radio Circle */}
-                <div className="pt-0.5 flex-shrink-0">
-                  <div
-                    className={`flex h-4 w-4 items-center justify-center rounded-full border transition-colors ${
-                      isSelected
-                        ? 'border-cyan-400 bg-cyan-400 text-slate-950'
-                        : 'border-slate-700 bg-slate-900 group-hover:border-slate-600'
+            <div className="flex items-center rounded-lg bg-[#EDEAE2] dark:bg-[#121110] p-0.5 text-xs self-start">
+              {(['all', 'female', 'male'] as const).map((g) => (
+                <button
+                  key={g}
+                  type="button"
+                  onClick={() => setFilterGender(g)}
+                  className={`px-2.5 py-1 rounded-md font-medium transition-colors whitespace-nowrap ${
+                    filterGender === g
+                      ? 'bg-white dark:bg-[#26231F] text-[#171614] dark:text-white'
+                      : 'text-[#5F5B53] dark:text-[#968F84] hover:text-[#171614] dark:hover:text-white'
+                  }`}
+                >
+                  {g === 'all'
+                    ? isAr
+                      ? 'الكل'
+                      : 'All'
+                    : g === 'female'
+                    ? isAr
+                      ? 'نسائي'
+                      : 'Female'
+                    : isAr
+                    ? 'رجالي'
+                    : 'Male'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Category Filter Strip */}
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none">
+            {categoryLabels.map((cat) => (
+              <button
+                key={cat.id}
+                type="button"
+                onClick={() => setFilterCategory(cat.id)}
+                className={`px-2.5 py-1 rounded-md text-[11px] font-medium whitespace-nowrap transition-colors ${
+                  filterCategory === cat.id
+                    ? 'bg-[#FDF1EC] dark:bg-[#261A15] text-[#D94E28] dark:text-[#EE6A43] font-semibold'
+                    : 'bg-[#F6F4EF] dark:bg-[#141210] text-[#5F5B53] dark:text-[#968F84] hover:text-[#171614] dark:hover:text-white'
+                }`}
+              >
+                {isAr ? cat.ar : cat.en}
+              </button>
+            ))}
+          </div>
+
+          {/* Scrollable Voice Cast List */}
+          <div className="divide-y divide-[#EDEAE2] dark:divide-[#26231F] border-t border-[#EDEAE2] dark:border-[#26231F] max-h-[380px] overflow-y-auto">
+            {filteredVoices.map((v) => {
+              const isSelected = selectedVoice === v.id;
+              const isAuditioning = auditioningVoice === v.id;
+              const targetAuditionId = v.isCustom ? v.baseVoice || 'Kore' : v.id;
+
+              return (
+                <div
+                  key={v.id}
+                  onClick={() => onSelectVoice(v.id)}
+                  className={`group flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 cursor-pointer transition-colors ${
+                    isSelected
+                      ? 'bg-[#FDF1EC] dark:bg-[#261A15]'
+                      : 'hover:bg-[#F1EEE7] dark:hover:bg-[#1D1B18]'
+                  }`}
+                >
+                  <div className="flex items-start gap-2.5 flex-1 min-w-0">
+                    <div className="pt-0.5 flex-shrink-0">
+                      <div
+                        className={`flex h-4 w-4 items-center justify-center rounded-full border transition-colors ${
+                          isSelected
+                            ? 'border-[#D94E28] bg-[#D94E28] text-white'
+                            : 'border-[#C4BEB2] dark:border-[#423D36] bg-white dark:bg-[#1A1816]'
+                        }`}
+                      >
+                        {isSelected && <Check className="h-2.5 w-2.5 stroke-[3]" />}
+                      </div>
+                    </div>
+
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="font-bold text-sm text-[#171614] dark:text-[#F3F0EA]">
+                          {isAr ? v.nameAr : v.nameEn}
+                        </span>
+                        <span className="text-[#B8B1A3] dark:text-[#4F4A42]" aria-hidden="true">
+                          ·
+                        </span>
+                        <span className="text-xs font-medium text-[#D94E28] dark:text-[#EE6A43]">
+                          {isAr ? v.timbreAr : v.timbreEn}
+                        </span>
+                        <span className="text-[#B8B1A3] dark:text-[#4F4A42]" aria-hidden="true">
+                          ·
+                        </span>
+                        <span className="text-[11px] text-[#5F5B53] dark:text-[#968F84] font-mono">
+                          {v.gender === 'female' ? (isAr ? 'أنثى' : 'F') : isAr ? 'ذكر' : 'M'}
+                        </span>
+                        {v.isCustom && (
+                          <>
+                            <span className="text-[#B8B1A3] dark:text-[#4F4A42]" aria-hidden="true">
+                              ·
+                            </span>
+                            <span className="text-[11px] font-semibold text-[#15803D] dark:text-emerald-400">
+                              {isAr ? `أساس ${v.baseVoice}` : `Base: ${v.baseVoice}`}
+                            </span>
+                          </>
+                        )}
+                      </div>
+
+                      <div className="mt-0.5 text-xs text-[#5F5B53] dark:text-[#968F84] line-clamp-1">
+                        {isAr ? v.bestForAr : v.bestForEn}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Waveform + Audition */}
+                  <div className="flex items-center justify-between sm:justify-end gap-2.5 flex-shrink-0">
+                    <div className="flex items-center gap-[2px] h-5 w-14 px-1 justify-center">
+                      {v.waveHeights.map((h, i) => (
+                        <div
+                          key={i}
+                          style={{ height: `${isAuditioning ? Math.min(100, h * 1.2) : h}%` }}
+                          className={`w-[2px] rounded-xs transition-all duration-150 ${
+                            isAuditioning || isSelected
+                              ? 'bg-[#D94E28] dark:bg-[#EE6A43]'
+                              : 'bg-[#CFC9BC] dark:bg-[#3A352E]'
+                          }`}
+                        />
+                      ))}
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      {v.isCustom && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onDeleteCustomVoice(v.id);
+                          }}
+                          className="rounded-md border border-[#DED9CE] dark:border-[#2A2723] bg-white dark:bg-[#1C1A17] p-1.5 text-[#5F5B53] hover:text-red-600 transition-colors"
+                          title={isAr ? 'حذف الصوت المخصص' : 'Delete custom voice'}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (v.isCustom && onPreviewCustomVoice && v.voiceDesignPrompt) {
+                            onPreviewCustomVoice(targetAuditionId, v.voiceDesignPrompt);
+                          } else if (onAuditionVoice) {
+                            onAuditionVoice(targetAuditionId);
+                          }
+                        }}
+                        className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-semibold transition-colors ${
+                          isAuditioning
+                            ? 'bg-[#171614] dark:bg-[#F3F0EA] text-white dark:text-[#171614]'
+                            : 'border border-[#DED9CE] dark:border-[#2A2723] bg-white dark:bg-[#1C1A17] text-[#171614] dark:text-[#F3F0EA] hover:bg-[#EDEAE2] dark:hover:bg-[#282521]'
+                        }`}
+                      >
+                        {isAuditioning ? (
+                          <>
+                            <Square className="h-3 w-3 fill-current" />
+                            <span>{isAr ? 'إيقاف' : 'Stop'}</span>
+                          </>
+                        ) : (
+                          <>
+                            <Play className="h-3 w-3 fill-current text-[#D94E28] dark:text-[#EE6A43]" />
+                            <span>{isAr ? 'استماع' : 'Audition'}</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+
+            {filteredVoices.length === 0 && (
+              <div className="p-6 text-center text-xs text-[#5F5B53] dark:text-[#968F84]">
+                {isAr
+                  ? 'لا توجد أصوات مطابقة لبحثك. جرب تصميم صوت مخصص.'
+                  : 'No matching voices found. Try Voice Design.'}
+              </div>
+            )}
+          </div>
+        </>
+      ) : (
+        /* Voice Design Studio Tab */
+        <div className="space-y-3">
+          <p className="text-xs text-[#5F5B53] dark:text-[#A39D93] leading-relaxed">
+            {isAr
+              ? 'صمّم أي شخصية صوتية من الصفر — حدد العمر، البحة، الدفء، والأسلوب وسيتولى محرك Gemini 3.8 Flash TTS تجسيدها.'
+              : 'Craft any custom voice persona from scratch via Gemini 3.8 Flash TTS — describe age, rasp, warmth, and energy.'}
+          </p>
+
+          <div className="space-y-1.5">
+            <div className="text-[11px] font-semibold text-[#5F5B53] dark:text-[#968F84]">
+              {isAr ? 'قوالب سريعة:' : 'Quick Templates:'}
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {VOICE_DESIGN_TEMPLATES.map((tpl) => (
+                <button
+                  key={tpl.id}
+                  type="button"
+                  onClick={() => {
+                    setDesignName(isAr ? tpl.nameAr : tpl.nameEn);
+                    setDesignGender(tpl.gender);
+                    setDesignAge(tpl.ageGroup);
+                    setDesignBaseVoice(tpl.baseVoice);
+                    setDesignPrompt(tpl.prompt);
+                  }}
+                  className="rounded-md border border-[#DED9CE] dark:border-[#2A2723] bg-[#F6F4EF] dark:bg-[#121110] px-2.5 py-1 text-[11px] text-[#171614] dark:text-[#E5E0D5] hover:border-[#D94E28] transition-colors"
+                >
+                  {isAr ? tpl.nameAr : tpl.nameEn}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <div>
+              <label className="text-[11px] text-[#5F5B53] dark:text-[#968F84] block mb-1">
+                {isAr ? 'اسم الصوت المخصص' : 'Voice Name'}
+              </label>
+              <input
+                type="text"
+                value={designName}
+                onChange={(e) => setDesignName(e.target.value)}
+                placeholder={isAr ? 'مثال: الراوي الحكيم' : 'e.g. Wise Narrator'}
+                className="w-full rounded-lg border border-[#DED9CE] dark:border-[#2A2723] bg-[#F6F4EF] dark:bg-[#121110] px-3 py-1.5 text-xs text-[#171614] dark:text-[#F3F0EA] placeholder-[#7A746A] focus:border-[#D94E28] focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="text-[11px] text-[#5F5B53] dark:text-[#968F84] block mb-1">
+                {isAr ? 'البصمة الأساسية' : 'Acoustic Base'}
+              </label>
+              <select
+                value={designBaseVoice}
+                onChange={(e) => setDesignBaseVoice(e.target.value)}
+                className="w-full rounded-lg border border-[#DED9CE] dark:border-[#2A2723] bg-[#F6F4EF] dark:bg-[#121110] px-2.5 py-1.5 text-xs text-[#171614] dark:text-[#F3F0EA] focus:border-[#D94E28] focus:outline-none"
+              >
+                {VOICES.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.id} · {isAr ? v.timbreAr : v.timbreEn}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2.5">
+            <div>
+              <label className="text-[11px] text-[#5F5B53] dark:text-[#968F84] block mb-1">
+                {isAr ? 'النوع' : 'Gender'}
+              </label>
+              <div className="grid grid-cols-2 rounded-lg border border-[#DED9CE] dark:border-[#2A2723] bg-[#EDEAE2] dark:bg-[#121110] p-0.5 text-xs">
+                {(['female', 'male'] as const).map((g) => (
+                  <button
+                    key={g}
+                    type="button"
+                    onClick={() => {
+                      setDesignGender(g);
+                      setDesignBaseVoice(g === 'female' ? 'Sulafat' : 'Charon');
+                    }}
+                    className={`py-1 rounded-md font-medium transition-colors ${
+                      designGender === g
+                        ? 'bg-white dark:bg-[#26231F] text-[#171614] dark:text-white'
+                        : 'text-[#5F5B53] dark:text-[#968F84]'
                     }`}
                   >
-                    {isSelected && <Check className="h-2.5 w-2.5 stroke-[3]" />}
-                  </div>
-                </div>
-
-                {/* Voice Information */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="font-bold text-sm text-slate-100 group-hover:text-cyan-300 transition-colors">
-                      {isAr ? v.nameAr : v.nameEn}
-                    </span>
-                    <span className="text-slate-600" aria-hidden="true">·</span>
-                    <span className="text-xs font-medium text-cyan-400/90">
-                      {isAr ? profile.timbreAr : profile.timbreEn}
-                    </span>
-                    <span className="text-slate-600" aria-hidden="true">·</span>
-                    <span className="text-[11px] text-slate-400 font-mono">
-                      {v.gender === 'female' ? (isAr ? 'أنثى' : 'Female') : isAr ? 'ذكر' : 'Male'}
-                    </span>
-                  </div>
-
-                  {/* Best For / Usages */}
-                  <div className="mt-1 flex items-center gap-1.5 text-xs text-slate-400 line-clamp-1">
-                    <span className="text-slate-400">{isAr ? 'الأنسب لـ:' : 'Best for:'}</span>
-                    <span className="text-slate-300">{isAr ? profile.bestForAr : profile.bestForEn}</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Right: Audio Waveform graphic & Audition Button */}
-              <div className="flex items-center justify-between sm:justify-end gap-3 flex-shrink-0 pt-2 sm:pt-0 border-t border-slate-800/60 sm:border-t-0">
-                {/* Mini Visualizer Silhouette */}
-                <div className="flex items-center gap-[2px] h-5 w-16 px-1 justify-center opacity-70 group-hover:opacity-100 transition-opacity">
-                  {profile.waveHeights.map((h, i) => (
-                    <div
-                      key={i}
-                      style={{ height: `${isAuditioning ? Math.min(100, h * 1.2) : h}%` }}
-                      className={`w-[2px] rounded-full transition-all duration-150 ${
-                        isAuditioning
-                          ? 'bg-amber-400 animate-pulse'
-                          : isSelected
-                          ? 'bg-cyan-400'
-                          : 'bg-slate-700'
-                      }`}
-                    />
-                  ))}
-                </div>
-
-                {/* Audition Play/Stop Trigger */}
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (onAuditionVoice) onAuditionVoice(v.id);
-                  }}
-                  className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-all ${
-                    isAuditioning
-                      ? 'bg-amber-400 text-slate-950 font-bold shadow-sm'
-                      : 'border border-slate-800 bg-slate-900 text-slate-300 hover:bg-slate-800 hover:text-white hover:border-slate-700'
-                  }`}
-                  title={isAr ? 'الاستماع لعينة هذا الصوت' : 'Audition voice sample'}
-                >
-                  {isAuditioning ? (
-                    <>
-                      <Square className="h-3 w-3 fill-current" />
-                      <span>{isAr ? 'إيقاف' : 'Stop'}</span>
-                    </>
-                  ) : (
-                    <>
-                      <Play className="h-3 w-3 fill-current" />
-                      <span>{isAr ? 'استماع' : 'Audition'}</span>
-                    </>
-                  )}
-                </button>
+                    {g === 'female' ? (isAr ? 'أنثى' : 'Female') : isAr ? 'ذكر' : 'Male'}
+                  </button>
+                ))}
               </div>
             </div>
-          );
-        })}
-      </div>
+
+            <div>
+              <label className="text-[11px] text-[#5F5B53] dark:text-[#968F84] block mb-1">
+                {isAr ? 'العمر' : 'Age Group'}
+              </label>
+              <div className="grid grid-cols-3 rounded-lg border border-[#DED9CE] dark:border-[#2A2723] bg-[#EDEAE2] dark:bg-[#121110] p-0.5 text-[11px]">
+                {(['young', 'adult', 'mature'] as const).map((age) => (
+                  <button
+                    key={age}
+                    type="button"
+                    onClick={() => setDesignAge(age)}
+                    className={`py-1 rounded-md font-medium transition-colors ${
+                      designAge === age
+                        ? 'bg-white dark:bg-[#26231F] text-[#171614] dark:text-white'
+                        : 'text-[#5F5B53] dark:text-[#968F84]'
+                    }`}
+                  >
+                    {age === 'young'
+                      ? isAr
+                        ? 'شاب'
+                        : 'Young'
+                      : age === 'adult'
+                      ? isAr
+                        ? 'ناضج'
+                        : 'Adult'
+                      : isAr
+                      ? 'مسن'
+                      : 'Mature'}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <label className="text-[11px] text-[#5F5B53] dark:text-[#968F84] block mb-1">
+              {isAr ? 'وصف الشخصية الصوتية' : 'Voice Persona Prompt'}
+            </label>
+            <textarea
+              rows={3}
+              value={designPrompt}
+              onChange={(e) => setDesignPrompt(e.target.value)}
+              placeholder={
+                isAr
+                  ? 'مثال: صوت رجل خمسيني دافئ ذو بحة خفيفة، يتحدث بهدوء وثقة كأنه راوي أفلام وثائقية...'
+                  : 'e.g. A warm, slightly gravelly 50-year-old male radio host speaking calmly with late-night confidence...'
+              }
+              className="w-full resize-none rounded-lg border border-[#DED9CE] dark:border-[#2A2723] bg-[#F6F4EF] dark:bg-[#121110] p-2.5 text-xs text-[#171614] dark:text-[#F3F0EA] placeholder-[#7A746A] focus:border-[#D94E28] focus:outline-none"
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            {onPreviewCustomVoice && (
+              <button
+                type="button"
+                disabled={!designPrompt.trim() || isPreviewingCustom}
+                onClick={() =>
+                  onPreviewCustomVoice(
+                    designBaseVoice,
+                    `${designGender === 'female' ? 'Female' : 'Male'} ${designAge} voice: ${designPrompt.trim()}`
+                  )
+                }
+                className="flex items-center gap-1.5 rounded-lg border border-[#DED9CE] dark:border-[#2A2723] bg-[#F6F4EF] dark:bg-[#22201C] hover:bg-[#EDEAE2] dark:hover:bg-[#2C2924] px-3 py-2 text-xs font-semibold text-[#171614] dark:text-[#F3F0EA] transition-colors disabled:opacity-40"
+              >
+                {isPreviewingCustom ? (
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin text-[#D94E28]" />
+                ) : (
+                  <Play className="h-3.5 w-3.5 fill-current text-[#D94E28]" />
+                )}
+                <span>{isAr ? 'معاينة الصوت' : 'Preview Voice'}</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              disabled={!designPrompt.trim()}
+              onClick={handleSaveDesignedVoice}
+              className="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-[#D94E28] hover:bg-[#C2411D] px-3 py-2 text-xs font-bold text-white transition-colors disabled:opacity-40"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              <span>{isAr ? 'حفظ وإضافة لمكتبتي' : 'Save & Use Voice'}</span>
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
