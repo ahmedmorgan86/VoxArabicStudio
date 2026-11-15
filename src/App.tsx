@@ -834,16 +834,31 @@ export default function App() {
       <main className="mx-auto max-w-[1380px] px-4 py-5 sm:px-6 space-y-5">
         {/* Error notification banner */}
         {errorMessage && (
-          <div className="flex items-center gap-3 rounded-lg border border-red-300 dark:border-red-800/80 bg-red-50 dark:bg-red-950/40 p-3 text-red-800 dark:text-red-200 text-xs">
-            <AlertCircle className="h-4 w-4 text-red-600 dark:text-red-400 flex-shrink-0" />
-            <div className="font-medium flex-1">{errorMessage}</div>
-            <button
-              type="button"
-              onClick={() => setErrorMessage(null)}
-              className="font-bold text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-200 px-1"
-            >
-              ✕
-            </button>
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-300 dark:border-red-800/80 bg-red-50 dark:bg-red-950/40 px-4 py-3 text-red-900 dark:text-red-200 text-xs">
+            <div className="flex items-start gap-2.5 flex-1 min-w-[240px]">
+              <AlertCircle className="h-4 w-4 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" />
+              <div className="font-medium leading-relaxed">{errorMessage}</div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {activeTab === 'single' &&
+                /(quota|حصة|429|RESOURCE_EXHAUSTED)/i.test(errorMessage) && (
+                  <button
+                    type="button"
+                    onClick={handleBrowserPreview}
+                    className="rounded-lg border border-red-300 dark:border-red-700 bg-white dark:bg-[#1A1816] px-2.5 py-1 text-[11px] font-semibold text-red-700 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors"
+                  >
+                    {isAr ? 'تشغيل المعاينة المحلية بالمتصفح' : 'Use Browser Preview'}
+                  </button>
+                )}
+              <button
+                type="button"
+                onClick={() => setErrorMessage(null)}
+                className="font-bold text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-200 px-1.5 py-0.5"
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
           </div>
         )}
 

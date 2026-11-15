@@ -140,6 +140,152 @@ function hasExpressiveAudioTags(text: string): boolean {
   return /<(breath|laugh|gasp)>|\|(yeah|mhm)\|/i.test(text);
 }
 
+interface ParsedGeminiError {
+  httpStatus: number;
+  errorCode: string;
+  isQuotaOrRateLimit: boolean;
+  isRetryableSameModel: boolean;
+  retryDelaySec?: number;
+  messageAr: string;
+  messageEn: string;
+}
+
+function formatRetryWaitAr(sec?: number): string {
+  if (!sec || sec <= 0) return 'لاحقاً';
+  if (sec < 60) return `بعد ${sec} ثانية`;
+  if (sec < 3600) return `بعد ${Math.ceil(sec / 60)} دقيقة`;
+  const hrs = Math.floor(sec / 3600);
+  const mins = Math.ceil((sec % 3600) / 60);
+  return mins > 0 ? `بعد ${hrs} ساعة و ${mins} دقيقة` : `بعد ${hrs} ساعة`;
+}
+
+function formatRetryWaitEn(sec?: number): string {
+  if (!sec || sec <= 0) return 'later';
+  if (sec < 60) return `in ${sec}s`;
+  if (sec < 3600) return `in ${Math.ceil(sec / 60)} min`;
+  const hrs = Math.floor(sec / 3600);
+  const mins = Math.ceil((sec % 3600) / 60);
+  return mins > 0 ? `in ${hrs}h ${mins}m` : `in ${hrs}h`;
+}
+
+function parseGeminiError(err: any): ParsedGeminiError {
+  const rawMsg = String(err?.message || err || 'Unknown error');
+  let parsedJson: any = null;
+
+  const jsonStart = rawMsg.indexOf('{');
+  if (jsonStart !== -1) {
+    try {
+      parsedJson = JSON.parse(rawMsg.slice(jsonStart));
+    } catch {
+      // ignore non-JSON tail
+    }
+  }
+
+  const errObj = parsedJson?.error || parsedJson;
+  const code = Number(err?.status || err?.code || errObj?.code || 500);
+  const statusStr = String(errObj?.status || err?.statusText || '').toUpperCase();
+  const detailMsg = String(errObj?.message || rawMsg);
+
+  let retryDelaySec: number | undefined;
+  const retryInfo = Array.isArray(errObj?.details)
+    ? errObj.details.find((d: any) => d?.retryDelay)
+    : null;
+  if (retryInfo?.retryDelay) {
+    const m = String(retryInfo.retryDelay).match(/(\d+(?:\.\d+)?)s/);
+    if (m) retryDelaySec = Math.ceil(Number(m[1]));
+  }
+
+  const isDailyQuota =
+    /RequestsPerDay|PerDayPerProject|free_tier_requests|limit:\s*10/i.test(detailMsg) ||
+    (retryDelaySec !== undefined && retryDelaySec > 120);
+
+  const isQuotaOrRateLimit =
+    code === 429 ||
+    statusStr === 'RESOURCE_EXHAUSTED' ||
+    /quota|rate.?limit|RESOURCE_EXHAUSTED/i.test(detailMsg);
+
+  if (isQuotaOrRateLimit) {
+    return {
+      httpStatus: 429,
+      errorCode: isDailyQuota ? 'QUOTA_EXCEEDED' : 'RATE_LIMITED',
+      isQuotaOrRateLimit: true,
+      isRetryableSameModel: !isDailyQuota && (retryDelaySec === undefined || retryDelaySec <= 10),
+      retryDelaySec,
+      messageAr: isDailyQuota
+        ? `تم استهلاك الحصة اليومية المجانية لنموذج الصوت (10 طلبات/يوم على الخطة المجانية). يمكنك ربط مفتاح API مدفوع من لوحة Settings > Secrets لرفع الحد فوراً، أو المحاولة مجدداً ${formatRetryWaitAr(retryDelaySec)}.`
+        : `تم تجاوز حد الطلبات المؤقت (Rate Limit). يرجى المحاولة ${formatRetryWaitAr(retryDelaySec || 15)}.`,
+      messageEn: isDailyQuota
+        ? `Daily free-tier quota exceeded (10 requests/day). Select a billing-enabled API key in Settings > Secrets to increase your quota immediately, or retry ${formatRetryWaitEn(retryDelaySec)}.`
+        : `Temporary rate limit reached. Please retry ${formatRetryWaitEn(retryDelaySec || 15)}.`,
+    };
+  }
+
+  if (code === 401 || code === 403 || /API_KEY_INVALID|PERMISSION_DENIED/i.test(detailMsg)) {
+    return {
+      httpStatus: code === 401 ? 401 : 403,
+      errorCode: 'API_KEY_ERROR',
+      isQuotaOrRateLimit: false,
+      isRetryableSameModel: false,
+      messageAr: 'مفتاح Gemini API غير صالح أو يفتقر للصلاحية. يرجى التحقق من المفتاح في Settings > Secrets.',
+      messageEn: 'Invalid or unauthorized Gemini API key. Please check Settings > Secrets.',
+    };
+  }
+
+  return {
+    httpStatus: code >= 400 && code < 600 ? code : 500,
+    errorCode: 'TTS_ERROR',
+    isQuotaOrRateLimit: false,
+    isRetryableSameModel: code === 503 || code === 500,
+    messageAr: detailMsg.length < 220 ? detailMsg : 'حدث خطأ أثناء معالجة الصوت. يرجى المحاولة مرة أخرى.',
+    messageEn: detailMsg.length < 220 ? detailMsg : 'Failed to synthesize speech. Please try again.',
+  };
+}
+
+async function generateTtsWithFallback(
+  ai: GoogleGenAI,
+  primaryModel: 'gemini-3.8-flash-lite-tts' | 'gemini-3.8-flash-tts',
+  fallbackModel: 'gemini-3.8-flash-lite-tts' | 'gemini-3.8-flash-tts' | null,
+  requestParams: Omit<Parameters<typeof ai.models.generateContent>[0], 'model'>
+): Promise<{ response: any; modelUsed: string }> {
+  try {
+    const response = await ai.models.generateContent({
+      model: primaryModel,
+      ...requestParams,
+    });
+    return { response, modelUsed: primaryModel };
+  } catch (primaryErr: any) {
+    const parsed = parseGeminiError(primaryErr);
+
+    // Quick retry once if transient RPM limit / 503
+    if (parsed.isRetryableSameModel) {
+      await new Promise((r) => setTimeout(r, 900));
+      try {
+        const retryResponse = await ai.models.generateContent({
+          model: primaryModel,
+          ...requestParams,
+        });
+        return { response: retryResponse, modelUsed: primaryModel };
+      } catch {
+        // proceed to fallback model
+      }
+    }
+
+    // Fallback to sibling TTS model if quota/404/503 hit
+    if (fallbackModel && fallbackModel !== primaryModel) {
+      console.warn(
+        `[TTS Fallback] ${primaryModel} failed (${parsed.errorCode}). Falling back to ${fallbackModel}.`
+      );
+      const fallbackResponse = await ai.models.generateContent({
+        model: fallbackModel,
+        ...requestParams,
+      });
+      return { response: fallbackResponse, modelUsed: fallbackModel };
+    }
+
+    throw primaryErr;
+  }
+}
+
 function extractWavPcm(wavBuffer: Buffer): {
   sampleRate: number;
   numChannels: number;
@@ -261,31 +407,35 @@ app.get('/api/voices/audition/:voice', async (req, res) => {
           `مرحباً بك في الاستوديو، أنا ${voice}، يسعدني تقديم نصوصك بأعلى جودة صوتية.`;
 
     const ai = getGeminiClient();
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash-lite-tts',
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            {
-              text: greetingText,
-              speechMetadata: {
-                style: 'Warm, expressive natural human delivery',
+    const { response } = await generateTtsWithFallback(
+      ai,
+      'gemini-3.8-flash-lite-tts',
+      'gemini-3.8-flash-tts',
+      {
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: greetingText,
+                speechMetadata: {
+                  style: 'Warm, expressive natural human delivery',
+                },
               },
+            ],
+          },
+        ],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            languageCode: lang,
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: voice },
             },
-          ],
-        },
-      ],
-      config: {
-        responseModalities: ['AUDIO'],
-        speechConfig: {
-          languageCode: lang,
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: voice },
           },
         },
-      },
-    });
+      }
+    );
 
     const audioBase64 =
       response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
@@ -304,7 +454,12 @@ app.get('/api/voices/audition/:voice', async (req, res) => {
     });
   } catch (err: any) {
     console.error('Audition error:', err);
-    return res.status(500).json({ error: err.message || 'Audition failed' });
+    const parsed = parseGeminiError(err);
+    return res.status(parsed.httpStatus).json({
+      error: parsed.messageEn,
+      errorAr: parsed.messageAr,
+      code: parsed.errorCode,
+    });
   }
 });
 
@@ -373,35 +528,42 @@ app.post('/api/tts', async (req, res) => {
       hasExpressiveAudioTags(text) ||
       (voiceSettings?.styleExaggeration ?? 0) >= 75;
 
-    const selectedModel = useFlashFlagship
-      ? 'gemini-3.8-flash-tts'
-      : 'gemini-3.8-flash-lite-tts';
+    const primaryModel: 'gemini-3.8-flash-lite-tts' | 'gemini-3.8-flash-tts' =
+      useFlashFlagship ? 'gemini-3.8-flash-tts' : 'gemini-3.8-flash-lite-tts';
+    const fallbackModel: 'gemini-3.8-flash-lite-tts' | 'gemini-3.8-flash-tts' =
+      primaryModel === 'gemini-3.8-flash-lite-tts'
+        ? 'gemini-3.8-flash-tts'
+        : 'gemini-3.8-flash-lite-tts';
 
-    const response = await ai.models.generateContent({
-      model: selectedModel,
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            {
-              text: text.trim(),
-              speechMetadata: {
-                style: combinedStyle,
+    const { response, modelUsed } = await generateTtsWithFallback(
+      ai,
+      primaryModel,
+      fallbackModel,
+      {
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: text.trim(),
+                speechMetadata: {
+                  style: combinedStyle,
+                },
               },
+            ],
+          },
+        ],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            languageCode: language === 'en' ? 'en' : 'ar',
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: chosenVoice },
             },
-          ],
-        },
-      ],
-      config: {
-        responseModalities: ['AUDIO'],
-        speechConfig: {
-          languageCode: language === 'en' ? 'en' : 'ar',
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: chosenVoice },
           },
         },
-      },
-    });
+      }
+    );
 
     const audioBase64 =
       response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
@@ -415,13 +577,17 @@ app.post('/api/tts', async (req, res) => {
       audioBase64,
       mimeType: 'audio/wav',
       voice: chosenVoice,
-      modelUsed: selectedModel,
+      modelUsed,
       textLength: text.length,
     });
   } catch (err: any) {
     console.error('Error generating speech:', err);
-    return res.status(500).json({
-      error: err.message || 'Failed to synthesize speech.',
+    const parsed = parseGeminiError(err);
+    const isAr = req.body?.language === 'ar';
+    return res.status(parsed.httpStatus).json({
+      error: isAr ? parsed.messageAr : parsed.messageEn,
+      errorCode: parsed.errorCode,
+      retryDelaySec: parsed.retryDelaySec,
     });
   }
 });
@@ -516,31 +682,43 @@ app.post('/api/tts/advanced', async (req, res) => {
         hasExpressiveAudioTags(paraText) ||
         styleExaggeration >= 75;
 
-      const response = await ai.models.generateContent({
-        model: useFlash ? 'gemini-3.8-flash-tts' : 'gemini-3.8-flash-lite-tts',
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              {
-                text: paraText,
-                speechMetadata: {
-                  style: styleSegments.join('. '),
+      const paraPrimary: 'gemini-3.8-flash-lite-tts' | 'gemini-3.8-flash-tts' = useFlash
+        ? 'gemini-3.8-flash-tts'
+        : 'gemini-3.8-flash-lite-tts';
+      const paraFallback: 'gemini-3.8-flash-lite-tts' | 'gemini-3.8-flash-tts' =
+        paraPrimary === 'gemini-3.8-flash-lite-tts'
+          ? 'gemini-3.8-flash-tts'
+          : 'gemini-3.8-flash-lite-tts';
+
+      const { response } = await generateTtsWithFallback(
+        ai,
+        paraPrimary,
+        paraFallback,
+        {
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: paraText,
+                  speechMetadata: {
+                    style: styleSegments.join('. '),
+                  },
                 },
+              ],
+            },
+          ],
+          config: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              languageCode: language === 'en' ? 'en' : 'ar',
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: paraVoice },
               },
-            ],
-          },
-        ],
-        config: {
-          responseModalities: ['AUDIO'],
-          speechConfig: {
-            languageCode: language === 'en' ? 'en' : 'ar',
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: paraVoice },
             },
           },
-        },
-      });
+        }
+      );
 
       const chunkBase64 =
         response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
@@ -598,8 +776,12 @@ app.post('/api/tts/advanced', async (req, res) => {
     });
   } catch (err: any) {
     console.error('Error in advanced multi-paragraph TTS:', err);
-    return res.status(500).json({
-      error: err.message || 'Failed to synthesize advanced multi-paragraph speech.',
+    const parsed = parseGeminiError(err);
+    const isAr = req.body?.language === 'ar';
+    return res.status(parsed.httpStatus).json({
+      error: isAr ? parsed.messageAr : parsed.messageEn,
+      errorCode: parsed.errorCode,
+      retryDelaySec: parsed.retryDelaySec,
     });
   }
 });
@@ -666,37 +848,41 @@ app.post('/api/tts/dialogue', async (req, res) => {
       };
     });
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash-tts',
-      contents: [
-        {
-          role: 'user',
-          parts,
-        },
-      ],
-      config: {
-        responseModalities: ['AUDIO'],
-        speechConfig: {
-          languageCode: language === 'en' ? 'en' : 'ar',
-          multiSpeakerVoiceConfig: {
-            speakerVoiceConfigs: [
-              {
-                speaker: normalizedSpeakerA,
-                voiceConfig: {
-                  prebuiltVoiceConfig: { voiceName: voiceA },
+    const { response } = await generateTtsWithFallback(
+      ai,
+      'gemini-3.8-flash-tts',
+      null,
+      {
+        contents: [
+          {
+            role: 'user',
+            parts,
+          },
+        ],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            languageCode: language === 'en' ? 'en' : 'ar',
+            multiSpeakerVoiceConfig: {
+              speakerVoiceConfigs: [
+                {
+                  speaker: normalizedSpeakerA,
+                  voiceConfig: {
+                    prebuiltVoiceConfig: { voiceName: voiceA },
+                  },
                 },
-              },
-              {
-                speaker: normalizedSpeakerB,
-                voiceConfig: {
-                  prebuiltVoiceConfig: { voiceName: voiceB },
+                {
+                  speaker: normalizedSpeakerB,
+                  voiceConfig: {
+                    prebuiltVoiceConfig: { voiceName: voiceB },
+                  },
                 },
-              },
-            ],
+              ],
+            },
           },
         },
-      },
-    });
+      }
+    );
 
     const audioBase64 =
       response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
@@ -712,8 +898,12 @@ app.post('/api/tts/dialogue', async (req, res) => {
     });
   } catch (err: any) {
     console.error('Error in dialogue TTS:', err);
-    return res.status(500).json({
-      error: err.message || 'Failed to synthesize multi-speaker dialogue.',
+    const parsed = parseGeminiError(err);
+    const isAr = req.body?.language === 'ar';
+    return res.status(parsed.httpStatus).json({
+      error: isAr ? parsed.messageAr : parsed.messageEn,
+      errorCode: parsed.errorCode,
+      retryDelaySec: parsed.retryDelaySec,
     });
   }
 });
@@ -727,33 +917,43 @@ app.post('/api/tashkeel', async (req, res) => {
     }
 
     const ai = getGeminiClient();
-
-    let vocalizedText = text;
-    try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: `أنت خبير في علم النحو والصرف واللغة العربية والأداء الصوتي الإذاعي.
+    const tashkeelPrompt = `أنت خبير في علم النحو والصرف واللغة العربية والأداء الصوتي الإذاعي.
 قم بضبط وتشكيل النص العربي التالي تشكيلاً كاملاً ودقيقاً بنسبة 100% (الحركات: الفتحة، الضمة، الكسرة، السكون، التنوين، والشدة) لكي يتم نطقه عبر محرك تحويل النص إلى صوت (TTS) بأعلى درجات الفصاحة وسلاسة الإعراب دون أي لبس.
 احتفظ بأي وسوم أداء صوتي مثل <breath> أو <laugh> أو <gasp> أو |yeah| أو |mhm| كما هي دون ترجمة أو تعديل.
 لا تقم بتغيير معاني الكلمات. أعد النص المشكول فقط مباشرة دون أي مقدمات أو شروحات أو أقواس إضافية.
 
 النص المراد تشكيله:
-${text}`,
+${text}`;
+
+    let vocalizedText = text;
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: tashkeelPrompt,
       });
       vocalizedText = response.text?.trim() || text;
-    } catch (geminiErr: any) {
-      console.warn('Tashkeel service temporary spike:', geminiErr?.message);
-      return res.json({
-        success: true,
-        vocalizedText: text,
-        notice: 'الخدمة تشهد ضغطاً مؤقتاً، تم الاحتفاظ بالنص الأصلي وهو جاهز للنطق.',
-      });
+    } catch {
+      try {
+        const liteResponse = await ai.models.generateContent({
+          model: 'gemini-3.1-flash-lite',
+          contents: tashkeelPrompt,
+        });
+        vocalizedText = liteResponse.text?.trim() || text;
+      } catch (geminiErr: any) {
+        console.warn('Tashkeel service temporary spike:', geminiErr?.message);
+        return res.json({
+          success: true,
+          vocalizedText: text,
+          notice: 'الخدمة تشهد ضغطاً مؤقتاً، تم الاحتفاظ بالنص الأصلي وهو جاهز للنطق.',
+        });
+      }
     }
 
     return res.json({ success: true, vocalizedText });
   } catch (err: any) {
     console.error('Error in auto-tashkeel:', err);
-    return res.status(500).json({ error: err.message || 'Failed to add tashkeel' });
+    const parsed = parseGeminiError(err);
+    return res.status(parsed.httpStatus).json({ error: parsed.messageAr });
   }
 });
 
@@ -836,23 +1036,32 @@ ${text}`;
     let convertedText = text;
     try {
       const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
+        model: 'gemini-4-hydrogen',
         contents: targetPrompt,
       });
       convertedText = response.text?.trim() || text;
-    } catch (geminiErr: any) {
-      console.warn('Dialect service temporary spike:', geminiErr?.message);
-      return res.json({
-        success: true,
-        convertedText: text,
-        notice: 'الخدمة تشهد ضغطاً مؤقتاً، يمكنك توليد الصوت مباشرة بالنص الحالي.',
-      });
+    } catch {
+      try {
+        const liteResponse = await ai.models.generateContent({
+          model: 'gemini-3.1-flash-lite',
+          contents: targetPrompt,
+        });
+        convertedText = liteResponse.text?.trim() || text;
+      } catch (geminiErr: any) {
+        console.warn('Dialect service temporary spike:', geminiErr?.message);
+        return res.json({
+          success: true,
+          convertedText: text,
+          notice: 'الخدمة تشهد ضغطاً مؤقتاً، يمكنك توليد الصوت مباشرة بالنص الحالي.',
+        });
+      }
     }
 
     return res.json({ success: true, convertedText });
   } catch (err: any) {
     console.error('Error in dialect conversion:', err);
-    return res.status(500).json({ error: err.message || 'Failed to convert dialect' });
+    const parsed = parseGeminiError(err);
+    return res.status(parsed.httpStatus).json({ error: parsed.messageAr });
   }
 });
 
