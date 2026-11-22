@@ -241,45 +241,86 @@ function parseGeminiError(err: any): ParsedGeminiError {
   };
 }
 
+type TtsModelName = 'gemini-3.8-flash-lite-tts' | 'gemini-3.8-flash-tts';
+
+// Track temporary quota/rate-limit cooldowns per TTS model so we route directly
+// to an available sibling model without wasted failed calls or noisy stderr warnings.
+const ttsModelCooldownUntil = new Map<TtsModelName, number>();
+
+function isTtsModelCoolingDown(model: TtsModelName): boolean {
+  const until = ttsModelCooldownUntil.get(model);
+  if (!until) return false;
+  if (Date.now() >= until) {
+    ttsModelCooldownUntil.delete(model);
+    return false;
+  }
+  return true;
+}
+
+function recordTtsModelCooldown(model: TtsModelName, parsed: ParsedGeminiError): void {
+  if (!parsed.isQuotaOrRateLimit) return;
+  const fallbackMs =
+    parsed.errorCode === 'QUOTA_EXCEEDED' ? 30 * 60 * 1000 : 30 * 1000;
+  const delayMs = parsed.retryDelaySec
+    ? Math.min(60 * 60 * 1000, Math.max(15 * 1000, parsed.retryDelaySec * 1000))
+    : fallbackMs;
+  ttsModelCooldownUntil.set(model, Date.now() + delayMs);
+}
+
 async function generateTtsWithFallback(
   ai: GoogleGenAI,
-  primaryModel: 'gemini-3.8-flash-lite-tts' | 'gemini-3.8-flash-tts',
-  fallbackModel: 'gemini-3.8-flash-lite-tts' | 'gemini-3.8-flash-tts' | null,
+  primaryModel: TtsModelName,
+  fallbackModel: TtsModelName | null,
   requestParams: Omit<Parameters<typeof ai.models.generateContent>[0], 'model'>
 ): Promise<{ response: any; modelUsed: string }> {
+  // If primaryModel is currently cooling down from quota exhaustion and a sibling fallback
+  // model is healthy, route directly to the fallback model immediately.
+  const startWithFallback =
+    Boolean(fallbackModel && fallbackModel !== primaryModel) &&
+    isTtsModelCoolingDown(primaryModel) &&
+    !isTtsModelCoolingDown(fallbackModel!);
+
+  const firstModel = startWithFallback ? fallbackModel! : primaryModel;
+  const secondModel =
+    fallbackModel && fallbackModel !== firstModel ? fallbackModel : null;
+
   try {
     const response = await ai.models.generateContent({
-      model: primaryModel,
+      model: firstModel,
       ...requestParams,
     });
-    return { response, modelUsed: primaryModel };
+    return { response, modelUsed: firstModel };
   } catch (primaryErr: any) {
     const parsed = parseGeminiError(primaryErr);
+    recordTtsModelCooldown(firstModel, parsed);
 
     // Quick retry once if transient RPM limit / 503
     if (parsed.isRetryableSameModel) {
       await new Promise((r) => setTimeout(r, 900));
       try {
         const retryResponse = await ai.models.generateContent({
-          model: primaryModel,
+          model: firstModel,
           ...requestParams,
         });
-        return { response: retryResponse, modelUsed: primaryModel };
+        ttsModelCooldownUntil.delete(firstModel);
+        return { response: retryResponse, modelUsed: firstModel };
       } catch {
         // proceed to fallback model
       }
     }
 
-    // Fallback to sibling TTS model if quota/404/503 hit
-    if (fallbackModel && fallbackModel !== primaryModel) {
-      console.warn(
-        `[TTS Fallback] ${primaryModel} failed (${parsed.errorCode}). Falling back to ${fallbackModel}.`
-      );
-      const fallbackResponse = await ai.models.generateContent({
-        model: fallbackModel,
-        ...requestParams,
-      });
-      return { response: fallbackResponse, modelUsed: fallbackModel };
+    // Seamlessly switch to sibling TTS model when quota/404/503 is hit
+    if (secondModel) {
+      try {
+        const fallbackResponse = await ai.models.generateContent({
+          model: secondModel,
+          ...requestParams,
+        });
+        return { response: fallbackResponse, modelUsed: secondModel };
+      } catch (fallbackErr: any) {
+        recordTtsModelCooldown(secondModel, parseGeminiError(fallbackErr));
+        throw fallbackErr;
+      }
     }
 
     throw primaryErr;
@@ -707,6 +748,146 @@ app.get('/api/voices/audition/:voice', async (req, res) => {
       error: parsed.messageEn,
       errorAr: parsed.messageAr,
       code: parsed.errorCode,
+    });
+  }
+});
+
+// Side-by-side A/B Voice Comparison endpoint (generates short sample for two voices on the same text)
+app.post('/api/voices/compare', async (req, res) => {
+  try {
+    const {
+      text,
+      voiceA = 'Kore',
+      voiceB = 'Charon',
+      voiceADesignPrompt,
+      voiceBDesignPrompt,
+      language = 'ar',
+      dialect = 'msa',
+      customDialect,
+      style = 'Natural and clear professional speaker',
+      customTonePrompt,
+    } = req.body;
+
+    if (!text || typeof text !== 'string' || !text.trim()) {
+      return res.status(400).json({
+        error: language === 'en' ? 'Sample text is required for comparison.' : 'يرجى إدخال نص قصير للمقارنة بين الصوتين.',
+      });
+    }
+
+    const trimmedSample = text.trim().slice(0, 280);
+    const ai = getGeminiClient();
+
+    const chosenA = VALID_GEMINI_VOICES.includes(voiceA) ? voiceA : 'Kore';
+    const chosenB = VALID_GEMINI_VOICES.includes(voiceB) ? voiceB : 'Charon';
+
+    let dialectNote = '';
+    if (dialect === 'custom' && typeof customDialect === 'string' && customDialect.trim()) {
+      dialectNote = customDialect.trim();
+    } else if (language === 'ar') {
+      dialectNote =
+        ARABIC_DIALECT_INSTRUCTIONS[dialect] ||
+        (typeof customDialect === 'string' && customDialect.trim()) ||
+        ARABIC_DIALECT_INSTRUCTIONS.msa;
+    } else {
+      dialectNote =
+        ENGLISH_DIALECT_INSTRUCTIONS[dialect] ||
+        (typeof customDialect === 'string' && customDialect.trim()) ||
+        ENGLISH_DIALECT_INSTRUCTIONS.american;
+    }
+
+    const synthesizeSlot = async (chosenVoice: string, designPrompt?: string) => {
+      const segments: string[] = [];
+      if (typeof designPrompt === 'string' && designPrompt.trim()) {
+        segments.push(`Voice Design Persona: ${designPrompt.trim()}`);
+      }
+      if (typeof style === 'string' && style.trim()) {
+        segments.push(`Performance Tone: ${style.trim()}`);
+      }
+      if (typeof customTonePrompt === 'string' && customTonePrompt.trim()) {
+        segments.push(`Custom Directing Note: ${customTonePrompt.trim()}`);
+      }
+      segments.push(`Dialect/Accent: ${dialectNote}`);
+      segments.push('Clear studio delivery for side-by-side voice audition.');
+
+      const useFlash =
+        Boolean(designPrompt && designPrompt.trim()) || hasExpressiveAudioTags(trimmedSample);
+      const primaryModel: 'gemini-3.8-flash-lite-tts' | 'gemini-3.8-flash-tts' = useFlash
+        ? 'gemini-3.8-flash-tts'
+        : 'gemini-3.8-flash-lite-tts';
+      const fallbackModel: 'gemini-3.8-flash-lite-tts' | 'gemini-3.8-flash-tts' =
+        primaryModel === 'gemini-3.8-flash-lite-tts'
+          ? 'gemini-3.8-flash-tts'
+          : 'gemini-3.8-flash-lite-tts';
+
+      const { response, modelUsed } = await generateTtsWithFallback(
+        ai,
+        primaryModel,
+        fallbackModel,
+        {
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: trimmedSample,
+                  speechMetadata: {
+                    style: segments.join('. '),
+                  },
+                },
+              ],
+            },
+          ],
+          config: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              languageCode: language === 'en' ? 'en' : 'ar',
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: chosenVoice },
+              },
+            },
+          },
+        }
+      );
+
+      const audioBase64 =
+        response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (!audioBase64) {
+        throw new Error(`No audio returned for voice ${chosenVoice}`);
+      }
+
+      const wavBuf = Buffer.from(audioBase64, 'base64');
+      const { sampleRate, numChannels, bitsPerSample, pcm } = extractWavPcm(wavBuf);
+      const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+      const durationSec = byteRate > 0 ? Number((pcm.length / byteRate).toFixed(2)) : 0;
+
+      return {
+        voice: chosenVoice,
+        audioBase64,
+        mimeType: 'audio/wav',
+        durationSec,
+        modelUsed,
+      };
+    };
+
+    const [sampleA, sampleB] = await Promise.all([
+      synthesizeSlot(chosenA, voiceADesignPrompt),
+      synthesizeSlot(chosenB, voiceBDesignPrompt),
+    ]);
+
+    return res.json({
+      success: true,
+      text: trimmedSample,
+      sampleA,
+      sampleB,
+    });
+  } catch (err: any) {
+    console.error('Voice compare error:', err);
+    const parsed = parseGeminiError(err);
+    const isAr = req.body?.language !== 'en';
+    return res.status(parsed.httpStatus).json({
+      error: isAr ? parsed.messageAr : parsed.messageEn,
+      errorCode: parsed.errorCode,
+      retryDelaySec: parsed.retryDelaySec,
     });
   }
 });

@@ -1450,6 +1450,13 @@ export default function App() {
                         onPreviewCustomVoice={handlePreviewCustomVoice}
                         isPreviewingCustom={isPreviewingCustom}
                         language={language}
+                        sampleText={inputText}
+                        selectedDialect={selectedDialect}
+                        customDialect={customDialect}
+                        styleInstruction={
+                          VOCAL_STYLES.find((s) => s.id === selectedStyleId)?.promptInstruction
+                        }
+                        customTonePrompt={customTonePrompt}
                         embedded
                       />
                     )}
@@ -1508,6 +1515,13 @@ export default function App() {
                     onPreviewCustomVoice={handlePreviewCustomVoice}
                     isPreviewingCustom={isPreviewingCustom}
                     language={language}
+                    sampleText={inputText}
+                    selectedDialect={selectedDialect}
+                    customDialect={customDialect}
+                    styleInstruction={
+                      VOCAL_STYLES.find((s) => s.id === selectedStyleId)?.promptInstruction
+                    }
+                    customTonePrompt={customTonePrompt}
                   />
 
                   <DialectSelector
