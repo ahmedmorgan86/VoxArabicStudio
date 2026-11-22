@@ -7,6 +7,8 @@ import {
   VOICES,
 } from '../data/voicesAndDialects';
 import { Plus, Trash2, Users, RefreshCw, Wand2, Sparkles } from 'lucide-react';
+import { DurationControlBar } from './DurationControlBar';
+import { estimateScriptDurationSeconds } from '../utils/audioHelper';
 
 interface DialogueStudioProps {
   language: Language;
@@ -24,6 +26,12 @@ interface DialogueStudioProps {
     customDialect?: string;
   }) => void;
   isLoading: boolean;
+  targetDurationEnabled: boolean;
+  onToggleTargetDuration: (enabled: boolean) => void;
+  targetDurationSeconds: number;
+  onTargetDurationSecondsChange: (seconds: number) => void;
+  durationNotice?: string | null;
+  onDismissDurationNotice?: () => void;
 }
 
 export const DialogueStudio: React.FC<DialogueStudioProps> = ({
@@ -31,6 +39,12 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   customVoices,
   onGenerateDialogue,
   isLoading,
+  targetDurationEnabled,
+  onToggleTargetDuration,
+  targetDurationSeconds,
+  onTargetDurationSecondsChange,
+  durationNotice,
+  onDismissDurationNotice,
 }) => {
   const isAr = language === 'ar';
 
@@ -82,6 +96,19 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
   }, [customVoices, isAr]);
 
   const dialects = isAr ? ARABIC_DIALECTS : ENGLISH_DIALECTS;
+
+  const estimatedDialogueSeconds = useMemo(() => {
+    const valid = lines.filter((l) => l.text.trim().length > 0);
+    if (valid.length === 0) return 0;
+    const sum = valid.reduce(
+      (acc, l, idx) =>
+        acc +
+        estimateScriptDurationSeconds(l.text, language, 1.0) +
+        (idx < valid.length - 1 ? 0.35 : 0),
+      0
+    );
+    return Number(sum.toFixed(1));
+  }, [lines, language]);
 
   const loadScenario = (type: 'podcast' | 'interview' | 'promo') => {
     if (type === 'podcast') {
@@ -482,6 +509,18 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         </div>
       </div>
 
+      {/* Target Voice Duration Control */}
+      <DurationControlBar
+        language={language}
+        enabled={targetDurationEnabled}
+        onToggleEnabled={onToggleTargetDuration}
+        targetSeconds={targetDurationSeconds}
+        onTargetSecondsChange={onTargetDurationSecondsChange}
+        estimatedSeconds={estimatedDialogueSeconds}
+        durationNotice={durationNotice}
+        onDismissNotice={onDismissDurationNotice}
+      />
+
       {/* Generate Action Button */}
       <button
         type="button"
@@ -497,7 +536,15 @@ export const DialogueStudio: React.FC<DialogueStudioProps> = ({
         ) : (
           <>
             <Wand2 className="h-4 w-4" />
-            <span>{isAr ? 'توليد الحوار الكامل (Master Dialogue WAV)' : 'Generate Dialogue Master (WAV)'}</span>
+            <span>
+              {targetDurationEnabled
+                ? isAr
+                  ? `توليد الحوار الكامل (${targetDurationSeconds} ثانية)`
+                  : `Generate Dialogue Master (${targetDurationSeconds}s)`
+                : isAr
+                ? 'توليد الحوار الكامل (Master Dialogue WAV)'
+                : 'Generate Dialogue Master (WAV)'}
+            </span>
           </>
         )}
       </button>

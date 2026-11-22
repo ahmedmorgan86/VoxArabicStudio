@@ -142,6 +142,88 @@ export function formatTime(seconds: number): string {
 }
 
 /**
+ * Estimates spoken duration in seconds for a script before TTS generation.
+ * Accounts for Arabic vs English speaking cadence, expressive tags, punctuation pauses, and speed.
+ */
+export function estimateScriptDurationSeconds(
+  text: string,
+  language: 'ar' | 'en' = 'ar',
+  speed = 1.0
+): number {
+  const trimmed = text.trim();
+  if (!trimmed) return 0;
+
+  const cueMatches = trimmed.match(/<(breath|laugh|gasp)>|\|(yeah|mhm)\|/gi);
+  const cueCount = cueMatches ? cueMatches.length : 0;
+
+  const cleanText = trimmed
+    .replace(/<(breath|laugh|gasp)>|\|(yeah|mhm)\|/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const words = cleanText ? cleanText.split(/\s+/).filter(Boolean).length : 0;
+  if (words === 0 && cueCount === 0) return 0;
+
+  // Count sentence/clause pauses for more realistic broadcast cadence
+  const pauseMatches = cleanText.match(/[.!?؟،,;:\n]+/g);
+  const pauseCount = pauseMatches ? pauseMatches.length : 0;
+
+  const baseWordsPerSec = language === 'ar' ? 2.15 : 2.48;
+  const clampedSpeed = Math.max(0.6, Math.min(1.5, speed || 1.0));
+  const speechSec = words / (baseWordsPerSec * clampedSpeed);
+  const cuesSec = cueCount * 0.45;
+  const pausesSec = Math.min(pauseCount * 0.16, speechSec * 0.28 + 0.6);
+
+  return Number(Math.max(0.8, speechSec + cuesSec + pausesSec + 0.25).toFixed(1));
+}
+
+/**
+ * Computes exact duration in seconds from a base64 WAV header.
+ */
+export function getWavBase64DurationSeconds(base64Wav: string): number {
+  try {
+    const binary = atob(base64Wav);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    const view = new DataView(bytes.buffer);
+    let sampleRate = 24000;
+    let numChannels = 1;
+    let bitsPerSample = 16;
+    let dataSize = Math.max(0, bytes.length - 44);
+
+    if (bytes.length >= 12) {
+      let pos = 12;
+      while (pos + 8 <= bytes.length) {
+        const chunkId = String.fromCharCode(
+          bytes[pos],
+          bytes[pos + 1],
+          bytes[pos + 2],
+          bytes[pos + 3]
+        );
+        const chunkSize = view.getUint32(pos + 4, true);
+        if (chunkId === 'fmt ' && pos + 24 <= bytes.length) {
+          numChannels = view.getUint16(pos + 10, true) || 1;
+          sampleRate = view.getUint32(pos + 12, true) || 24000;
+          bitsPerSample = view.getUint16(pos + 22, true) || 16;
+        } else if (chunkId === 'data') {
+          dataSize = Math.min(chunkSize, bytes.length - (pos + 8));
+          break;
+        }
+        pos += 8 + chunkSize + (chunkSize % 2);
+      }
+    }
+
+    const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+    if (byteRate <= 0) return 0;
+    return Number((dataSize / byteRate).toFixed(2));
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * Extracts true PCM audio peak values (0.05 to 1.0) from a base64 WAV file
  * for ultra-crisp, accurate SoundCloud/Descript-style waveform visualization
  */

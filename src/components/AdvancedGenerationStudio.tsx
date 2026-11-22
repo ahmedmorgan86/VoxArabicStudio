@@ -24,6 +24,8 @@ import {
   Trash2,
   Wand2,
 } from 'lucide-react';
+import { DurationControlBar } from './DurationControlBar';
+import { estimateScriptDurationSeconds } from '../utils/audioHelper';
 
 interface AdvancedGenerationStudioProps {
   language: Language;
@@ -36,6 +38,12 @@ interface AdvancedGenerationStudioProps {
   editorText: string;
   onGenerateAdvanced: () => void;
   isLoading: boolean;
+  targetDurationEnabled: boolean;
+  onToggleTargetDuration: (enabled: boolean) => void;
+  targetDurationSeconds: number;
+  onTargetDurationSecondsChange: (seconds: number) => void;
+  durationNotice?: string | null;
+  onDismissDurationNotice?: () => void;
 }
 
 export const AdvancedGenerationStudio: React.FC<AdvancedGenerationStudioProps> = ({
@@ -49,6 +57,12 @@ export const AdvancedGenerationStudio: React.FC<AdvancedGenerationStudioProps> =
   editorText,
   onGenerateAdvanced,
   isLoading,
+  targetDurationEnabled,
+  onToggleTargetDuration,
+  targetDurationSeconds,
+  onTargetDurationSecondsChange,
+  durationNotice,
+  onDismissDurationNotice,
 }) => {
   const isAr = language === 'ar';
   const [previewingId, setPreviewingId] = useState<string | null>(null);
@@ -311,6 +325,17 @@ export const AdvancedGenerationStudio: React.FC<AdvancedGenerationStudioProps> =
     (acc, p) => acc + p.text.trim().split(/\s+/).filter(Boolean).length,
     0
   );
+
+  const estimatedTotalSeconds = useMemo(() => {
+    const valid = paragraphs.filter((p) => p.text.trim().length > 0);
+    if (valid.length === 0) return 0;
+    const total = valid.reduce((sum, p, idx) => {
+      const paraSec = estimateScriptDurationSeconds(p.text, language, p.speechRate);
+      const pauseSec = idx < valid.length - 1 ? (p.pauseAfterMs || 0) / 1000 : 0;
+      return sum + paraSec + pauseSec;
+    }, 0);
+    return Number(total.toFixed(1));
+  }, [paragraphs, language]);
 
   return (
     <div className="space-y-4">
@@ -650,6 +675,20 @@ export const AdvancedGenerationStudio: React.FC<AdvancedGenerationStudioProps> =
         })}
       </div>
 
+      {/* Target Duration Controls for Master Output */}
+      <div className="rounded-xl border border-[#DED9CE] dark:border-[#2A2723] bg-white dark:bg-[#1A1816] p-3">
+        <DurationControlBar
+          language={language}
+          enabled={targetDurationEnabled}
+          onToggleEnabled={onToggleTargetDuration}
+          targetSeconds={targetDurationSeconds}
+          onTargetSecondsChange={onTargetDurationSecondsChange}
+          estimatedSeconds={estimatedTotalSeconds}
+          durationNotice={durationNotice}
+          onDismissNotice={onDismissDurationNotice}
+        />
+      </div>
+
       {/* Add Paragraph & Master Synthesize Action */}
       <div className="flex flex-col sm:flex-row items-center gap-2.5">
         <button
@@ -680,7 +719,11 @@ export const AdvancedGenerationStudio: React.FC<AdvancedGenerationStudioProps> =
             <>
               <Wand2 className="h-4 w-4" />
               <span>
-                {isAr
+                {targetDurationEnabled
+                  ? isAr
+                    ? `توليد المقطع المتقدم (${targetDurationSeconds} ثانية)`
+                    : `Render Advanced Master (${targetDurationSeconds}s)`
+                  : isAr
                   ? 'توليد المقطع المتقدم الكامل (Master WAV / MP3)'
                   : 'Render Advanced Multi-Paragraph Master'}
               </span>

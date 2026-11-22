@@ -14,6 +14,7 @@ import { DialogueStudio } from './components/DialogueStudio';
 import { AdvancedGenerationStudio } from './components/AdvancedGenerationStudio';
 import { AudioHistory } from './components/AudioHistory';
 import { AudioEffectsRack } from './components/AudioEffectsRack';
+import { DurationControlBar } from './components/DurationControlBar';
 import {
   AdvancedParagraph,
   Language,
@@ -32,6 +33,8 @@ import {
   VOCAL_STYLES,
 } from './data/voicesAndDialects';
 import {
+  estimateScriptDurationSeconds,
+  getWavBase64DurationSeconds,
   speakWithBrowserWebSpeech,
   stopBrowserWebSpeech,
 } from './utils/audioHelper';
@@ -152,6 +155,12 @@ export default function App() {
     compressionAmount: 55,
     warmthEnabled: false,
   });
+
+  // Target Voice Duration before synthesis
+  const [targetDurationEnabled, setTargetDurationEnabled] = useState(false);
+  const [targetDurationSeconds, setTargetDurationSeconds] = useState(15);
+  const [isFittingDuration, setIsFittingDuration] = useState(false);
+  const [durationNotice, setDurationNotice] = useState<string | null>(null);
 
   // Generation status
   const [isLoading, setIsLoading] = useState(false);
@@ -480,11 +489,86 @@ export default function App() {
     (effectsConfig.compressionEnabled ? 1 : 0) +
     (effectsConfig.warmthEnabled ? 1 : 0);
 
+  const estimatedSingleDuration = useMemo(
+    () => estimateScriptDurationSeconds(inputText, language, voiceSettings.speed),
+    [inputText, language, voiceSettings.speed]
+  );
+
+  // Adapt Single Voice script using AI to naturally match targetDurationSeconds
+  const handleFitScriptToDuration = async () => {
+    if (!inputText.trim() || !targetDurationEnabled) return;
+    setIsFittingDuration(true);
+    setErrorMessage(null);
+    setDurationNotice(null);
+
+    try {
+      const res = await fetch('/api/script/fit-duration', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: inputText.trim(),
+          targetSeconds: targetDurationSeconds,
+          language,
+          dialect: selectedDialect,
+          customDialect: selectedDialect === 'custom' ? customDialect : undefined,
+          speed: voiceSettings.speed,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to fit script to duration');
+      }
+      if (data.fittedText) {
+        setInputText(data.fittedText);
+      }
+    } catch (err: any) {
+      setErrorMessage(
+        err.message ||
+          (isAr
+            ? 'تعذر تكييف النص للمدة المطلوبة. حاول مرة أخرى.'
+            : 'Could not adapt script to target duration.')
+      );
+    } finally {
+      setIsFittingDuration(false);
+    }
+  };
+
+  const evaluateDurationNotice = (
+    fitMode: string | undefined,
+    finalSec: number | undefined,
+    requestedSec: number | undefined
+  ) => {
+    if (!requestedSec) {
+      setDurationNotice(null);
+      return;
+    }
+    if (fitMode === 'max_speed_capped' && finalSec) {
+      setDurationNotice(
+        isAr
+          ? `النص كان أطول بكثير من ${requestedSec}ث، فتم تسريع الأداء للحد الطبيعي (${finalSec.toFixed(
+              1
+            )}ث) دون قص أي كلمة. اضغط "تكييف النص لـ ${requestedSec}ث (AI)" للحصول على التوقيت الدقيق.`
+          : `Script was much longer than ${requestedSec}s, so playback capped at natural speed (${finalSec.toFixed(
+              1
+            )}s) without cutting words. Use "Fit Script to ${requestedSec}s (AI)" for exact timing.`
+      );
+    } else if (fitMode === 'stretched_and_padded') {
+      setDurationNotice(
+        isAr
+          ? `تم ضبط الملف الصوتي ليكون ${requestedSec}ث بدقة (مع إبطاء طبيعي ومساحة صمت ختامية لأن النص قصير).`
+          : `Audio locked to exactly ${requestedSec}s (naturally slowed with clean tail silence for short script).`
+      );
+    } else {
+      setDurationNotice(null);
+    }
+  };
+
   // Synthesize Single Voice
   const handleSynthesize = async () => {
     if (!inputText.trim()) return;
     setIsLoading(true);
     setErrorMessage(null);
+    setDurationNotice(null);
     stopBrowserWebSpeech();
     setIsBrowserSpeaking(false);
 
@@ -497,6 +581,7 @@ export default function App() {
       selectedDialect === 'custom' && customDialect.trim()
         ? customDialect.trim()
         : selectedDialect;
+    const requestedDuration = targetDurationEnabled ? targetDurationSeconds : undefined;
 
     try {
       const res = await fetch('/api/tts', {
@@ -512,6 +597,7 @@ export default function App() {
           style: styleInstruction,
           customTonePrompt: customTonePrompt.trim() || undefined,
           voiceSettings,
+          targetDurationSeconds: requestedDuration,
         }),
       });
 
@@ -532,11 +618,27 @@ export default function App() {
       }
 
       if (data.audioBase64) {
+        const lockDspDuration =
+          requestedDuration && data.durationFitMode !== 'max_speed_capped'
+            ? requestedDuration
+            : undefined;
         const processedAudioBase64 = await applyAudioEffectsToWavBase64(
           data.audioBase64,
-          effectsConfig
+          effectsConfig,
+          lockDspDuration
         );
         const effectsSummary = formatEffectsSummary(effectsConfig, language);
+        const finalDuration =
+          getWavBase64DurationSeconds(processedAudioBase64) || data.durationSec || undefined;
+
+        evaluateDurationNotice(data.durationFitMode, finalDuration, requestedDuration);
+
+        const durationBadge = finalDuration
+          ? language === 'ar'
+            ? `${finalDuration.toFixed(1)}ث`
+            : `${finalDuration.toFixed(1)}s`
+          : '';
+        const metaParts = [displayDialect, durationBadge, effectsSummary].filter(Boolean);
 
         const audioItem: GeneratedAudioItem = {
           id: Math.random().toString(36).substring(2, 9),
@@ -551,6 +653,8 @@ export default function App() {
             : styleObj?.nameAr || selectedStyleId,
           effectsSummary: effectsSummary || undefined,
           createdAt: Date.now(),
+          duration: finalDuration,
+          targetDurationSeconds: requestedDuration,
         };
 
         setCurrentAudio({
@@ -558,9 +662,7 @@ export default function App() {
           audioBase64: processedAudioBase64,
           mimeType: data.mimeType || 'audio/wav',
           voice: displayVoiceName,
-          dialectName: effectsSummary
-            ? `${displayDialect} · ${effectsSummary}`
-            : displayDialect,
+          dialectName: metaParts.join(' · '),
         });
 
         setHistory((prev) => [audioItem, ...prev]);
@@ -593,13 +695,19 @@ export default function App() {
   }) => {
     setIsLoading(true);
     setErrorMessage(null);
+    setDurationNotice(null);
     stopBrowserWebSpeech();
+
+    const requestedDuration = targetDurationEnabled ? targetDurationSeconds : undefined;
 
     try {
       const res = await fetch('/api/tts/dialogue', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          ...payload,
+          targetDurationSeconds: requestedDuration,
+        }),
       });
 
       const contentType = res.headers.get('content-type') || '';
@@ -619,11 +727,27 @@ export default function App() {
       }
 
       if (data.audioBase64) {
+        const lockDspDuration =
+          requestedDuration && data.durationFitMode !== 'max_speed_capped'
+            ? requestedDuration
+            : undefined;
         const processedAudioBase64 = await applyAudioEffectsToWavBase64(
           data.audioBase64,
-          effectsConfig
+          effectsConfig,
+          lockDspDuration
         );
         const effectsSummary = formatEffectsSummary(effectsConfig, language);
+        const finalDuration =
+          getWavBase64DurationSeconds(processedAudioBase64) || data.durationSec || undefined;
+
+        evaluateDurationNotice(data.durationFitMode, finalDuration, requestedDuration);
+
+        const durationBadge = finalDuration
+          ? language === 'ar'
+            ? `${finalDuration.toFixed(1)}ث`
+            : `${finalDuration.toFixed(1)}s`
+          : '';
+        const metaParts = ['Dual Dialogue', durationBadge, effectsSummary].filter(Boolean);
 
         const audioItem: GeneratedAudioItem = {
           id: Math.random().toString(36).substring(2, 9),
@@ -636,6 +760,8 @@ export default function App() {
           styleName: 'Dialogue Scene',
           effectsSummary: effectsSummary || undefined,
           createdAt: Date.now(),
+          duration: finalDuration,
+          targetDurationSeconds: requestedDuration,
         };
 
         setCurrentAudio({
@@ -643,9 +769,7 @@ export default function App() {
           audioBase64: processedAudioBase64,
           mimeType: data.mimeType || 'audio/wav',
           voice: `${payload.speakerAName} · ${payload.speakerBName}`,
-          dialectName: effectsSummary
-            ? `Dual Dialogue · ${effectsSummary}`
-            : 'Dual Dialogue',
+          dialectName: metaParts.join(' · '),
         });
 
         setHistory((prev) => [audioItem, ...prev]);
@@ -664,6 +788,7 @@ export default function App() {
 
     setIsLoading(true);
     setErrorMessage(null);
+    setDurationNotice(null);
     stopBrowserWebSpeech();
     setIsBrowserSpeaking(false);
 
@@ -674,6 +799,7 @@ export default function App() {
       selectedDialect === 'custom' && customDialect.trim()
         ? customDialect.trim()
         : selectedDialect;
+    const requestedDuration = targetDurationEnabled ? targetDurationSeconds : undefined;
 
     try {
       const payloadParagraphs = validParagraphs.map((p) => {
@@ -706,6 +832,7 @@ export default function App() {
           stability: voiceSettings.stability,
           styleExaggeration: voiceSettings.styleExaggeration,
           speakerBoost: voiceSettings.speakerBoost,
+          targetDurationSeconds: requestedDuration,
         }),
       });
 
@@ -726,15 +853,33 @@ export default function App() {
       }
 
       if (data.audioBase64) {
+        const lockDspDuration =
+          requestedDuration && data.durationFitMode !== 'max_speed_capped'
+            ? requestedDuration
+            : undefined;
         const processedAudioBase64 = await applyAudioEffectsToWavBase64(
           data.audioBase64,
-          effectsConfig
+          effectsConfig,
+          lockDspDuration
         );
         const effectsSummary = formatEffectsSummary(effectsConfig, language);
+        const finalDuration =
+          getWavBase64DurationSeconds(processedAudioBase64) || data.durationSec || undefined;
+
+        evaluateDurationNotice(data.durationFitMode, finalDuration, requestedDuration);
+
         const paraSummary =
           language === 'ar'
             ? `${validParagraphs.length} فقرات متقدمة`
             : `${validParagraphs.length} Advanced Paragraphs`;
+        const durationBadge = finalDuration
+          ? language === 'ar'
+            ? `${finalDuration.toFixed(1)}ث`
+            : `${finalDuration.toFixed(1)}s`
+          : '';
+        const metaParts = [paraSummary, displayDialect, durationBadge, effectsSummary].filter(
+          Boolean
+        );
 
         const audioItem: GeneratedAudioItem = {
           id: Math.random().toString(36).substring(2, 9),
@@ -747,6 +892,8 @@ export default function App() {
           styleName: paraSummary,
           effectsSummary: effectsSummary || undefined,
           createdAt: Date.now(),
+          duration: finalDuration,
+          targetDurationSeconds: requestedDuration,
         };
 
         setCurrentAudio({
@@ -754,9 +901,7 @@ export default function App() {
           audioBase64: processedAudioBase64,
           mimeType: data.mimeType || 'audio/wav',
           voice: displayVoiceName,
-          dialectName: effectsSummary
-            ? `${paraSummary} · ${displayDialect} · ${effectsSummary}`
-            : `${paraSummary} · ${displayDialect}`,
+          dialectName: metaParts.join(' · '),
         });
 
         setHistory((prev) => [audioItem, ...prev]);
@@ -954,6 +1099,36 @@ export default function App() {
                     : 'Dry'}
                 </span>
               </button>
+
+              <span className="text-[#DED9CE] dark:text-[#2A2723]" aria-hidden="true">
+                /
+              </span>
+
+              <button
+                type="button"
+                onClick={() => setTargetDurationEnabled((prev) => !prev)}
+                className="flex items-center gap-1.5 hover:text-[#D94E28] dark:hover:text-[#EE6A43] transition-colors whitespace-nowrap"
+                title={isAr ? 'انقر لتفعيل أو إيقاف تحديد المدة' : 'Toggle exact target duration'}
+              >
+                <span className="text-[#5F5B53] dark:text-[#968F84]">
+                  {isAr ? 'المدة:' : 'Duration:'}
+                </span>
+                <span
+                  className={`font-bold font-mono tabular-nums ${
+                    targetDurationEnabled
+                      ? 'text-[#D94E28] dark:text-[#EE6A43]'
+                      : 'text-[#171614] dark:text-[#F3F0EA]'
+                  }`}
+                >
+                  {targetDurationEnabled
+                    ? isAr
+                      ? `${targetDurationSeconds}ث`
+                      : `${targetDurationSeconds}s`
+                    : isAr
+                    ? 'تلقائي'
+                    : 'Auto'}
+                </span>
+              </button>
             </div>
 
             {/* Inspector Display Switcher */}
@@ -1124,6 +1299,21 @@ export default function App() {
                       </span>
                     </div>
 
+                    {/* Target Voice Duration Control */}
+                    <DurationControlBar
+                      language={language}
+                      enabled={targetDurationEnabled}
+                      onToggleEnabled={setTargetDurationEnabled}
+                      targetSeconds={targetDurationSeconds}
+                      onTargetSecondsChange={setTargetDurationSeconds}
+                      estimatedSeconds={estimatedSingleDuration}
+                      onFitScriptToDuration={handleFitScriptToDuration}
+                      isFittingScript={isFittingDuration}
+                      canFitScript={Boolean(inputText.trim())}
+                      durationNotice={durationNotice}
+                      onDismissNotice={() => setDurationNotice(null)}
+                    />
+
                     {/* Primary Execution Row */}
                     <div className="pt-3 border-t border-[#EDEAE2] dark:border-[#26231F] flex flex-col sm:flex-row items-center gap-2.5">
                       <button
@@ -1143,7 +1333,13 @@ export default function App() {
                           <>
                             <Volume2 className="h-4 w-4" />
                             <span>
-                              {isAr ? 'توليد الصوت الآن (Master WAV / MP3)' : 'Synthesize Master Audio'}
+                              {targetDurationEnabled
+                                ? isAr
+                                  ? `توليد الصوت (${targetDurationSeconds} ثانية · WAV / MP3)`
+                                  : `Synthesize Audio (${targetDurationSeconds}s · WAV / MP3)`
+                                : isAr
+                                ? 'توليد الصوت الآن (Master WAV / MP3)'
+                                : 'Synthesize Master Audio'}
                             </span>
                           </>
                         )}
@@ -1191,6 +1387,12 @@ export default function App() {
                   editorText={inputText}
                   onGenerateAdvanced={handleGenerateAdvanced}
                   isLoading={isLoading}
+                  targetDurationEnabled={targetDurationEnabled}
+                  onToggleTargetDuration={setTargetDurationEnabled}
+                  targetDurationSeconds={targetDurationSeconds}
+                  onTargetDurationSecondsChange={setTargetDurationSeconds}
+                  durationNotice={durationNotice}
+                  onDismissDurationNotice={() => setDurationNotice(null)}
                 />
               )}
             </div>
@@ -1350,6 +1552,12 @@ export default function App() {
                 customVoices={customVoices}
                 onGenerateDialogue={handleGenerateDialogue}
                 isLoading={isLoading}
+                targetDurationEnabled={targetDurationEnabled}
+                onToggleTargetDuration={setTargetDurationEnabled}
+                targetDurationSeconds={targetDurationSeconds}
+                onTargetDurationSecondsChange={setTargetDurationSeconds}
+                durationNotice={durationNotice}
+                onDismissDurationNotice={() => setDurationNotice(null)}
               />
             </div>
             <div className="lg:col-span-4">
@@ -1374,17 +1582,22 @@ export default function App() {
         {/* Master Takes History */}
         <AudioHistory
           history={history}
-          onSelectAudio={(item) =>
+          onSelectAudio={(item) => {
+            const durBadge = item.duration
+              ? language === 'ar'
+                ? `${item.duration.toFixed(1)}ث`
+                : `${item.duration.toFixed(1)}s`
+              : '';
             setCurrentAudio({
               id: item.id,
               audioBase64: item.audioBase64,
               mimeType: item.mimeType,
               voice: item.voice,
-              dialectName: item.effectsSummary
-                ? `${item.dialect} · ${item.effectsSummary}`
-                : item.dialect,
-            })
-          }
+              dialectName: [item.dialect, durBadge, item.effectsSummary]
+                .filter(Boolean)
+                .join(' · '),
+            });
+          }}
           onClearHistory={() => setHistory([])}
           onDeleteItem={(id) => setHistory((prev) => prev.filter((item) => item.id !== id))}
           currentAudioId={currentAudio?.id}

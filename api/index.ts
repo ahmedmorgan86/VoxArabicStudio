@@ -351,6 +351,254 @@ function buildWavFromPcm(
   return Buffer.concat([header, pcm]);
 }
 
+function parseTargetDurationSeconds(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const num = Number(value);
+  if (!Number.isFinite(num) || num < 2 || num > 300) return undefined;
+  return Number(num.toFixed(1));
+}
+
+function estimateSpeechSecondsServer(
+  text: string,
+  language: string = 'ar',
+  speed = 1.0
+): number {
+  const trimmed = text.trim();
+  if (!trimmed) return 0;
+  const cues = trimmed.match(/<(breath|laugh|gasp)>|\|(yeah|mhm)\|/gi)?.length || 0;
+  const clean = trimmed
+    .replace(/<(breath|laugh|gasp)>|\|(yeah|mhm)\|/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const words = clean ? clean.split(/\s+/).filter(Boolean).length : 0;
+  const pauses = clean.match(/[.!?؟،,;:\n]+/g)?.length || 0;
+  const wps = language === 'en' ? 2.48 : 2.15;
+  const clampedSpeed = Math.max(0.6, Math.min(1.5, speed || 1.0));
+  const speechSec = words / (wps * clampedSpeed);
+  return Number(
+    Math.max(0.8, speechSec + cues * 0.45 + Math.min(pauses * 0.16, speechSec * 0.28 + 0.6) + 0.25).toFixed(1)
+  );
+}
+
+function buildTargetDurationDirective(targetSeconds: number, estimatedSeconds: number): string {
+  const ratio = estimatedSeconds > 0 ? estimatedSeconds / targetSeconds : 1.0;
+  if (ratio > 1.25) {
+    return `Timing Target: deliver smoothly and briskly with minimal pauses so the entire script finishes cleanly in approximately ${targetSeconds} seconds`;
+  }
+  if (ratio < 0.78) {
+    return `Timing Target: deliver at a deliberate, unhurried, spacious cadence with natural expressive pauses so the speech fills approximately ${targetSeconds} seconds`;
+  }
+  return `Timing Target: pace the delivery naturally to finish right around ${targetSeconds} seconds`;
+}
+
+/**
+ * Pitch-preserving WSOLA (Waveform Similarity Overlap-Add) time-stretching for 16-bit mono PCM.
+ */
+function wsolaTimeStretchMono(
+  input: Int16Array,
+  targetFrames: number,
+  sampleRate: number
+): Int16Array {
+  const inputLen = input.length;
+  if (targetFrames <= 0) return new Int16Array(0);
+  if (inputLen === 0) return new Int16Array(targetFrames);
+
+  let winSize = Math.max(256, Math.round(sampleRate * 0.04)); // 40ms window
+  if (winSize % 2 !== 0) winSize += 1;
+  const hop = winSize / 2;
+  const searchRadius = Math.max(64, Math.round(sampleRate * 0.01)); // ±10ms search
+
+  if (inputLen <= winSize + 16 || targetFrames <= winSize) {
+    const simple = new Int16Array(targetFrames);
+    const copyLen = Math.min(inputLen, targetFrames);
+    for (let i = 0; i < copyLen; i++) simple[i] = input[i];
+    return simple;
+  }
+
+  // Precompute Hann window
+  const hann = new Float32Array(winSize);
+  for (let i = 0; i < winSize; i++) {
+    hann[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / winSize));
+  }
+
+  const out = new Float32Array(targetFrames);
+  const weight = new Float32Array(targetFrames);
+  const speedRatio = inputLen / targetFrames;
+
+  let prevInPos = 0;
+
+  for (let outPos = 0; outPos < targetFrames; outPos += hop) {
+    let bestInPos = 0;
+
+    if (outPos === 0) {
+      bestInPos = 0;
+    } else {
+      const nominalIn = Math.round(outPos * speedRatio);
+      const refPos = Math.min(inputLen - hop - 1, Math.max(0, prevInPos + hop));
+      const minCand = Math.max(0, nominalIn - searchRadius);
+      const maxCand = Math.min(inputLen - winSize, nominalIn + searchRadius);
+
+      if (minCand >= maxCand) {
+        bestInPos = Math.max(0, Math.min(inputLen - winSize, nominalIn));
+      } else {
+        bestInPos = Math.max(minCand, Math.min(maxCand, nominalIn));
+        let bestScore = -Infinity;
+
+        for (let cand = minCand; cand <= maxCand; cand += 2) {
+          let cross = 0;
+          let energy = 0;
+          for (let k = 0; k < hop; k += 4) {
+            const a = input[refPos + k];
+            const b = input[cand + k];
+            cross += a * b;
+            energy += b * b;
+          }
+          const score = cross / (Math.sqrt(energy) + 1e-3);
+          if (score > bestScore) {
+            bestScore = score;
+            bestInPos = cand;
+          }
+        }
+      }
+    }
+
+    const limit = Math.min(winSize, targetFrames - outPos, inputLen - bestInPos);
+    for (let i = 0; i < limit; i++) {
+      const w = outPos === 0 && i < hop ? 1.0 : hann[i];
+      out[outPos + i] += input[bestInPos + i] * w;
+      weight[outPos + i] += w;
+    }
+
+    prevInPos = bestInPos;
+  }
+
+  const result = new Int16Array(targetFrames);
+  for (let i = 0; i < targetFrames; i++) {
+    const val = weight[i] > 1e-4 ? out[i] / weight[i] : 0;
+    result[i] = Math.max(-32768, Math.min(32767, Math.round(val)));
+  }
+
+  // Smooth short fade-in (10ms) and fade-out (20ms) to avoid any edge click
+  const fadeIn = Math.min(Math.round(sampleRate * 0.01), Math.floor(targetFrames / 8));
+  const fadeOut = Math.min(Math.round(sampleRate * 0.02), Math.floor(targetFrames / 6));
+  for (let i = 0; i < fadeIn; i++) {
+    result[i] = Math.round(result[i] * (i / fadeIn));
+  }
+  for (let i = 0; i < fadeOut; i++) {
+    const idx = targetFrames - fadeOut + i;
+    result[idx] = Math.round(result[idx] * (1 - i / fadeOut));
+  }
+
+  return result;
+}
+
+type ServerDurationFitMode =
+  | 'auto'
+  | 'exact'
+  | 'stretched'
+  | 'stretched_and_padded'
+  | 'max_speed_capped';
+
+function fitWavBufferToTargetDuration(
+  wavBuffer: Buffer,
+  targetSeconds?: number
+): {
+  wavBuffer: Buffer;
+  originalDurationSec: number;
+  finalDurationSec: number;
+  durationFitMode: ServerDurationFitMode;
+} {
+  const { sampleRate, numChannels, bitsPerSample, pcm } = extractWavPcm(wavBuffer);
+  const bytesPerSample = Math.max(1, bitsPerSample / 8);
+  const blockAlign = numChannels * bytesPerSample;
+  const totalFrames = blockAlign > 0 ? Math.floor(pcm.length / blockAlign) : 0;
+  const originalDurationSec =
+    sampleRate > 0 ? Number((totalFrames / sampleRate).toFixed(2)) : 0;
+
+  if (!targetSeconds || totalFrames <= 0 || bitsPerSample !== 16 || numChannels !== 1) {
+    return {
+      wavBuffer,
+      originalDurationSec,
+      finalDurationSec: originalDurationSec,
+      durationFitMode: 'auto',
+    };
+  }
+
+  // Read mono Int16 samples
+  const rawSamples = new Int16Array(totalFrames);
+  for (let i = 0; i < totalFrames; i++) {
+    rawSamples[i] = pcm.readInt16LE(i * 2);
+  }
+
+  // Trim excessive leading/trailing dead air (> 65ms) while keeping 55ms natural breath margin
+  const silenceThreshold = 190;
+  const marginFrames = Math.round(sampleRate * 0.055);
+  let firstActive = 0;
+  let lastActive = totalFrames - 1;
+
+  while (firstActive < totalFrames && Math.abs(rawSamples[firstActive]) < silenceThreshold) {
+    firstActive++;
+  }
+  while (lastActive > firstActive && Math.abs(rawSamples[lastActive]) < silenceThreshold) {
+    lastActive--;
+  }
+
+  const trimStart = firstActive < lastActive ? Math.max(0, firstActive - marginFrames) : 0;
+  const trimEnd =
+    firstActive < lastActive ? Math.min(totalFrames, lastActive + marginFrames) : totalFrames;
+  const trimmed = rawSamples.subarray(trimStart, trimEnd);
+  const trimmedFrames = trimmed.length;
+
+  const targetFrames = Math.max(1, Math.round(targetSeconds * sampleRate));
+  const speedRatio = trimmedFrames / targetFrames;
+
+  let finalSamples: Int16Array;
+  let mode: ServerDurationFitMode;
+
+  if (Math.abs(speedRatio - 1) <= 0.015) {
+    finalSamples = new Int16Array(targetFrames);
+    const copyCount = Math.min(trimmedFrames, targetFrames);
+    finalSamples.set(trimmed.subarray(0, copyCount), 0);
+    const fadeOut = Math.min(Math.round(sampleRate * 0.025), Math.floor(copyCount / 6));
+    for (let i = 0; i < fadeOut; i++) {
+      const idx = copyCount - fadeOut + i;
+      finalSamples[idx] = Math.round(finalSamples[idx] * (1 - i / fadeOut));
+    }
+    mode = 'exact';
+  } else if (speedRatio < 0.72) {
+    // Text is notably shorter than requested duration: slow down naturally (0.75x) then pad clean silence
+    const naturalStretchedFrames = Math.min(targetFrames, Math.round(trimmedFrames / 0.75));
+    const stretchedSpeech = wsolaTimeStretchMono(trimmed, naturalStretchedFrames, sampleRate);
+    finalSamples = new Int16Array(targetFrames);
+    finalSamples.set(stretchedSpeech, 0);
+    mode = 'stretched_and_padded';
+  } else if (speedRatio > 1.48) {
+    // Text is much longer than requested duration: cap speed at natural 1.48x (never cut off spoken words)
+    const cappedFrames = Math.max(1, Math.round(trimmedFrames / 1.48));
+    finalSamples = wsolaTimeStretchMono(trimmed, cappedFrames, sampleRate);
+    mode = 'max_speed_capped';
+  } else {
+    // Within natural pitch-preserving stretch zone [0.72x .. 1.48x]: hit exact targetFrames
+    finalSamples = wsolaTimeStretchMono(trimmed, targetFrames, sampleRate);
+    mode = 'stretched';
+  }
+
+  const outPcm = Buffer.alloc(finalSamples.length * 2);
+  for (let i = 0; i < finalSamples.length; i++) {
+    outPcm.writeInt16LE(finalSamples[i], i * 2);
+  }
+
+  const fittedWav = buildWavFromPcm(outPcm, sampleRate, numChannels, bitsPerSample);
+  const finalDurationSec = Number((finalSamples.length / sampleRate).toFixed(2));
+
+  return {
+    wavBuffer: fittedWav,
+    originalDurationSec,
+    finalDurationSec,
+    durationFitMode: mode,
+  };
+}
+
 // Health check endpoint
 app.get('/api/health', (_req, res) => {
   res.json({
@@ -477,6 +725,7 @@ app.post('/api/tts', async (req, res) => {
       customTonePrompt,
       voiceSettings,
       modelMode = 'auto',
+      targetDurationSeconds,
     } = req.body;
 
     if (!text || typeof text !== 'string' || !text.trim()) {
@@ -484,6 +733,7 @@ app.post('/api/tts', async (req, res) => {
     }
 
     const ai = getGeminiClient();
+    const parsedTargetDuration = parseTargetDurationSeconds(targetDurationSeconds);
 
     let dialectNote = '';
     if (dialect === 'custom' && typeof customDialect === 'string' && customDialect.trim()) {
@@ -515,6 +765,14 @@ app.post('/api/tts', async (req, res) => {
     const settingsDirective = buildVoiceSettingsDirective(voiceSettings);
     if (settingsDirective) {
       toneSegments.push(`Acoustic Delivery: ${settingsDirective}`);
+    }
+    if (parsedTargetDuration) {
+      const estSec = estimateSpeechSecondsServer(
+        text.trim(),
+        language === 'en' ? 'en' : 'ar',
+        voiceSettings?.speed || 1.0
+      );
+      toneSegments.push(buildTargetDurationDirective(parsedTargetDuration, estSec));
     }
     toneSegments.push('Pristine vocal fidelity, realistic cadence, natural human breathing and intonation.');
 
@@ -565,20 +823,26 @@ app.post('/api/tts', async (req, res) => {
       }
     );
 
-    const audioBase64 =
+    const rawAudioBase64 =
       response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
 
-    if (!audioBase64) {
+    if (!rawAudioBase64) {
       throw new Error('No audio returned from Gemini TTS engine.');
     }
 
+    const rawWavBuffer = Buffer.from(rawAudioBase64, 'base64');
+    const fitted = fitWavBufferToTargetDuration(rawWavBuffer, parsedTargetDuration);
+
     return res.json({
       success: true,
-      audioBase64,
+      audioBase64: fitted.wavBuffer.toString('base64'),
       mimeType: 'audio/wav',
       voice: chosenVoice,
       modelUsed,
       textLength: text.length,
+      durationSec: fitted.finalDurationSec,
+      originalDurationSec: fitted.originalDurationSec,
+      durationFitMode: fitted.durationFitMode,
     });
   } catch (err: any) {
     console.error('Error generating speech:', err);
@@ -605,6 +869,7 @@ app.post('/api/tts/advanced', async (req, res) => {
       stability = 50,
       styleExaggeration = 35,
       speakerBoost = true,
+      targetDurationSeconds,
     } = req.body;
 
     if (!Array.isArray(paragraphs) || paragraphs.length === 0) {
@@ -619,6 +884,7 @@ app.post('/api/tts/advanced', async (req, res) => {
     }
 
     const ai = getGeminiClient();
+    const parsedTargetDuration = parseTargetDurationSeconds(targetDurationSeconds);
 
     let dialectNote = '';
     if (dialect === 'custom' && typeof customDialect === 'string' && customDialect.trim()) {
@@ -766,13 +1032,17 @@ app.post('/api/tts/advanced', async (req, res) => {
       outputChannels,
       outputBitsPerSample
     );
+    const fitted = fitWavBufferToTargetDuration(mergedWav, parsedTargetDuration);
 
     return res.json({
       success: true,
-      audioBase64: mergedWav.toString('base64'),
+      audioBase64: fitted.wavBuffer.toString('base64'),
       mimeType: 'audio/wav',
       paragraphCount: validParagraphs.length,
       paragraphDurations,
+      durationSec: fitted.finalDurationSec,
+      originalDurationSec: fitted.originalDurationSec,
+      durationFitMode: fitted.durationFitMode,
     });
   } catch (err: any) {
     console.error('Error in advanced multi-paragraph TTS:', err);
@@ -800,6 +1070,7 @@ app.post('/api/tts/dialogue', async (req, res) => {
       language = 'ar',
       dialect,
       customDialect,
+      targetDurationSeconds,
     } = req.body;
 
     if (!Array.isArray(dialogueLines) || dialogueLines.length === 0) {
@@ -807,6 +1078,7 @@ app.post('/api/tts/dialogue', async (req, res) => {
     }
 
     const ai = getGeminiClient();
+    const parsedTargetDuration = parseTargetDurationSeconds(targetDurationSeconds);
 
     const voiceA = VALID_GEMINI_VOICES.includes(speakerAVoice) ? speakerAVoice : 'Puck';
     const voiceB = VALID_GEMINI_VOICES.includes(speakerBVoice) ? speakerBVoice : 'Kore';
@@ -829,6 +1101,14 @@ app.post('/api/tts/dialogue', async (req, res) => {
           : ENGLISH_DIALECT_INSTRUCTIONS[dialect] || '';
     }
 
+    const totalDialogueText = dialogueLines.map((l: any) => String(l.text || '')).join(' ');
+    const dialogueTimingHint = parsedTargetDuration
+      ? buildTargetDurationDirective(
+          parsedTargetDuration,
+          estimateSpeechSecondsServer(totalDialogueText, language === 'en' ? 'en' : 'ar', 1.0)
+        )
+      : '';
+
     const parts = dialogueLines.map((line: any) => {
       const isB = String(line.speaker).trim() === normalizedSpeakerB;
       const targetSpeaker = isB ? normalizedSpeakerB : normalizedSpeakerA;
@@ -837,6 +1117,7 @@ app.post('/api/tts/dialogue', async (req, res) => {
         personaPrompt ? `Voice Persona: ${personaPrompt}` : '',
         line.style || 'Conversational and expressive',
         dialectContext ? `Dialect/Accent: ${dialectContext}` : '',
+        dialogueTimingHint,
       ].filter(Boolean);
 
       return {
@@ -884,17 +1165,23 @@ app.post('/api/tts/dialogue', async (req, res) => {
       }
     );
 
-    const audioBase64 =
+    const rawAudioBase64 =
       response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
 
-    if (!audioBase64) {
+    if (!rawAudioBase64) {
       throw new Error('No audio generated for dialogue.');
     }
 
+    const rawWavBuffer = Buffer.from(rawAudioBase64, 'base64');
+    const fitted = fitWavBufferToTargetDuration(rawWavBuffer, parsedTargetDuration);
+
     return res.json({
       success: true,
-      audioBase64,
+      audioBase64: fitted.wavBuffer.toString('base64'),
       mimeType: 'audio/wav',
+      durationSec: fitted.finalDurationSec,
+      originalDurationSec: fitted.originalDurationSec,
+      durationFitMode: fitted.durationFitMode,
     });
   } catch (err: any) {
     console.error('Error in dialogue TTS:', err);
@@ -1062,6 +1349,100 @@ ${text}`;
     console.error('Error in dialect conversion:', err);
     const parsed = parseGeminiError(err);
     return res.status(parsed.httpStatus).json({ error: parsed.messageAr });
+  }
+});
+
+// AI Script Adaptation to Fit Target Voice Duration
+app.post('/api/script/fit-duration', async (req, res) => {
+  try {
+    const {
+      text,
+      targetSeconds,
+      language = 'ar',
+      dialect = 'msa',
+      customDialect,
+      speed = 1.0,
+    } = req.body;
+
+    if (!text || typeof text !== 'string' || !text.trim()) {
+      return res.status(400).json({ error: 'Text is required' });
+    }
+
+    const parsedTarget = parseTargetDurationSeconds(targetSeconds);
+    if (!parsedTarget) {
+      return res.status(400).json({ error: 'targetSeconds must be between 2 and 300 seconds' });
+    }
+
+    const ai = getGeminiClient();
+    const isEn = language === 'en';
+    const clampedSpeed = Math.max(0.6, Math.min(1.5, Number(speed) || 1.0));
+    const wordsPerSec = isEn ? 2.45 : 2.15;
+    const targetWordCount = Math.max(4, Math.round(parsedTarget * wordsPerSec * clampedSpeed));
+    const minWords = Math.max(3, Math.round(targetWordCount * 0.88));
+    const maxWords = Math.max(minWords + 2, Math.round(targetWordCount * 1.12));
+
+    const dialectNote =
+      dialect === 'custom' && typeof customDialect === 'string' && customDialect.trim()
+        ? customDialect.trim()
+        : isEn
+        ? ENGLISH_DIALECT_INSTRUCTIONS[dialect] || 'Natural fluent English'
+        : ARABIC_DIALECT_INSTRUCTIONS[dialect] || 'الفصحى المعاصرة الواضحة';
+
+    const fitPrompt = isEn
+      ? `You are a professional voiceover copywriter and broadcast timing director.
+Rewrite the following voiceover script so that when read aloud naturally at ${clampedSpeed.toFixed(2)}x speed, it fits precisely within ${parsedTarget} seconds (strictly between ${minWords} and ${maxWords} words, aiming for ~${targetWordCount} words).
+Rules:
+1. Preserve the core message, intent, and tone of the original script.
+2. Write in this accent/style: ${dialectNote}.
+3. If the script is too long, tighten and condense gracefully; if too short, enrich naturally without fluff.
+4. Preserve any expressive audio tags like <breath>, <laugh>, <gasp>, |yeah|, |mhm| where appropriate.
+5. Output ONLY the final ready-to-read script text, with no title, quotes, word count, or commentary.
+
+Original script:
+${text.trim()}`
+      : `أنت كاتب سيناريو ومخرج تعليق صوتي محترف متخصص في ضبط توقيت الإعلانات والفويس أوفر بالثانية.
+أعد صياغة النص الصوتي التالي بدقة بحيث يستغرق عند إلقائه بصوت طبيعي وبسرعة ${clampedSpeed.toFixed(2)}x مدة ${parsedTarget} ثانية بالضبط (التزم بأن يكون عدد الكلمات بين ${minWords} و ${maxWords} كلمة، والمستهدف المثالي حوالي ${targetWordCount} كلمة).
+القواعد:
+1. حافظ على الفكرة الأساسية والرسالة والروح الأصلية للنص.
+2. التزم بنفس اللهجة والأسلوب: ${dialectNote}.
+3. إذا كان النص الأصلي طويلاً، لخّصه واختصره بسلاسة وإيقاع إذاعي جميل؛ وإذا كان قصيراً، قم بتوسيعه بعبارات طبيعية جذابة ومتماسكة.
+4. حافظ على أي وسوم أداء صوتي مثل <breath> أو <laugh> أو <gasp> إن وُجدت وبشكل متوازن.
+5. أعد النص النهائي الجاهز للقراءة فقط مباشرة، بدون أي مقدمات أو أقواس أو عدّاد كلمات أو شروحات.
+
+النص الأصلي:
+${text.trim()}`;
+
+    let fittedText = text.trim();
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: fitPrompt,
+      });
+      fittedText = response.text?.trim() || fittedText;
+    } catch {
+      const liteResponse = await ai.models.generateContent({
+        model: 'gemini-3.1-flash-lite',
+        contents: fitPrompt,
+      });
+      fittedText = liteResponse.text?.trim() || fittedText;
+    }
+
+    // Strip accidental surrounding quotes if model returned them
+    fittedText = fittedText.replace(/^["«“]+|["»”]+$/g, '').trim();
+
+    return res.json({
+      success: true,
+      fittedText,
+      targetSeconds: parsedTarget,
+      estimatedSeconds: estimateSpeechSecondsServer(fittedText, isEn ? 'en' : 'ar', clampedSpeed),
+    });
+  } catch (err: any) {
+    console.error('Error in script fit-duration:', err);
+    const parsed = parseGeminiError(err);
+    const isAr = req.body?.language !== 'en';
+    return res.status(parsed.httpStatus).json({
+      error: isAr ? parsed.messageAr : parsed.messageEn,
+    });
   }
 });
 

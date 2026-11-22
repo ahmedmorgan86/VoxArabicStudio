@@ -96,6 +96,13 @@ export interface AudioEffectsConfig {
   warmthEnabled: boolean;
 }
 
+export type DurationFitMode =
+  | 'auto'
+  | 'exact'
+  | 'stretched'
+  | 'stretched_and_padded'
+  | 'max_speed_capped';
+
 export interface GeneratedAudioItem {
   id: string;
   text: string;
@@ -108,6 +115,7 @@ export interface GeneratedAudioItem {
   effectsSummary?: string;
   createdAt: number;
   duration?: number;
+  targetDurationSeconds?: number;
 }
 
 export interface DialogueLine {

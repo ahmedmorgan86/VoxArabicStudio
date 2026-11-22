@@ -120,7 +120,8 @@ function encodeAudioBufferToWavBase64(buffer: AudioBuffer): string {
  */
 export async function applyAudioEffectsToWavBase64(
   base64Wav: string,
-  config: AudioEffectsConfig
+  config: AudioEffectsConfig,
+  exactDurationSeconds?: number
 ): Promise<string> {
   if (!config.reverbEnabled && !config.compressionEnabled && !config.warmthEnabled) {
     return base64Wav;
@@ -150,7 +151,7 @@ export async function applyAudioEffectsToWavBase64(
     const decodedBuffer = await tempCtx.decodeAudioData(bytes.buffer.slice(0));
     await tempCtx.close().catch(() => {});
 
-    // Add tail room if reverb is enabled so the tail decays smoothly
+    // Add tail room if reverb is enabled, unless target duration is explicitly locked
     const tailSeconds = config.reverbEnabled
       ? config.reverbSpace === 'cathedral'
         ? 2.2
@@ -160,7 +161,14 @@ export async function applyAudioEffectsToWavBase64(
       : 0.05;
 
     const outputChannels = config.reverbEnabled ? 2 : decodedBuffer.numberOfChannels;
-    const totalLength = decodedBuffer.length + Math.floor(tailSeconds * decodedBuffer.sampleRate);
+    const lockedSamples =
+      typeof exactDurationSeconds === 'number' && exactDurationSeconds > 0
+        ? Math.max(1, Math.round(exactDurationSeconds * decodedBuffer.sampleRate))
+        : null;
+    const totalLength =
+      lockedSamples !== null
+        ? lockedSamples
+        : decodedBuffer.length + Math.floor(tailSeconds * decodedBuffer.sampleRate);
 
     const offlineCtx = new OfflineCtx(
       outputChannels,
@@ -233,6 +241,25 @@ export async function applyAudioEffectsToWavBase64(
 
     source.start(0);
     const renderedBuffer = await offlineCtx.startRendering();
+
+    // Smooth 45ms tail fade-out when duration is locked so reverb/audio ends cleanly without clicks
+    if (lockedSamples !== null) {
+      const fadeSamples = Math.min(
+        Math.floor(decodedBuffer.sampleRate * 0.045),
+        Math.floor(renderedBuffer.length / 4)
+      );
+      if (fadeSamples > 0) {
+        const startFade = renderedBuffer.length - fadeSamples;
+        for (let ch = 0; ch < renderedBuffer.numberOfChannels; ch++) {
+          const data = renderedBuffer.getChannelData(ch);
+          for (let i = 0; i < fadeSamples; i++) {
+            const gain = 1 - i / fadeSamples;
+            data[startFade + i] *= gain;
+          }
+        }
+      }
+    }
+
     return encodeAudioBufferToWavBase64(renderedBuffer);
   } catch (err) {
     console.warn('Audio effects DSP processing bypassed due to error:', err);

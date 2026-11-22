@@ -64,6 +64,14 @@ export const AudioHistory: React.FC<AudioHistoryProps> = ({
                   <span className="font-bold text-[#D94E28] dark:text-[#EE6A43]">{item.voice}</span>
                   <span aria-hidden="true">·</span>
                   <span>{item.dialect}</span>
+                  {typeof item.duration === 'number' && item.duration > 0 && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span className="font-semibold text-[#171614] dark:text-[#F3F0EA]">
+                        {isAr ? `${item.duration.toFixed(1)}ث` : `${item.duration.toFixed(1)}s`}
+                      </span>
+                    </>
+                  )}
                   {item.effectsSummary && (
                     <>
                       <span aria-hidden="true">·</span>
